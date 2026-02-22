@@ -86,7 +86,7 @@ for AZ in "${AZ_LIST[@]}"; do
     if [[ -z "$FIRST_GWLBE" ]]; then
         FIRST_GWLBE="$GWLBE_ID"
     fi
-    ((GWLBE_INDEX++))
+    GWLBE_INDEX=$((GWLBE_INDEX + 1))
 done
 
 # For each business CIDR, try to match AZ; fallback to first GWLBE
@@ -112,7 +112,7 @@ for CIDR in "${CIDRS[@]}"; do
         --vpc-endpoint-id "$TARGET_GWLBE"
 
     log_info "Route ${CIDR} -> ${TARGET_GWLBE} (${TARGET_AZ})"
-    ((CIDR_INDEX++))
+    CIDR_INDEX=$((CIDR_INDEX + 1))
 done
 
 log_info "=== VGW Ingress Routing Complete ==="

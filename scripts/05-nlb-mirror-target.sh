@@ -51,7 +51,6 @@ else
     --query 'TargetGroups[0].TargetGroupArn' --output text)
 
   save_var MIRROR_TG_ARN "$MIRROR_TG_ARN"
-  tag_resource "$MIRROR_TG_ARN"
   log_info "Created target group: $MIRROR_TG_ARN"
 fi
 

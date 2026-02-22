@@ -89,7 +89,7 @@ for AZ in "${AZ_LIST[@]}"; do
 
     save_var "APPLIANCE_INSTANCE_ID_${INSTANCE_INDEX}" "$INSTANCE_ID"
     APPLIANCE_INSTANCE_IDS+=("$INSTANCE_ID")
-    ((INSTANCE_INDEX++))
+    INSTANCE_INDEX=$((INSTANCE_INDEX + 1))
 done
 
 log_info "Appliance instances launched: ${APPLIANCE_INSTANCE_IDS[*]}"
@@ -218,7 +218,7 @@ for AZ in "${AZ_LIST[@]}"; do
 
     if check_var_exists "$VAR_NAME"; then
         log_info "GWLBE in ${AZ} already exists: $(eval echo \$${VAR_NAME})"
-        ((GWLBE_INDEX++))
+        GWLBE_INDEX=$((GWLBE_INDEX + 1))
         continue
     fi
 
@@ -235,8 +235,11 @@ for AZ in "${AZ_LIST[@]}"; do
 
     save_var "$VAR_NAME" "$GWLBE_ID"
     log_info "Created GWLBE in ${AZ}: ${GWLBE_ID}"
-    ((GWLBE_INDEX++))
+    GWLBE_INDEX=$((GWLBE_INDEX + 1))
 done
+
+# Reload to pick up newly saved GWLBE IDs
+load_env
 
 # Wait for all endpoints to become available
 log_info "Waiting for all GWLB Endpoints to become available..."
