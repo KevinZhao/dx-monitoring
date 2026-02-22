@@ -12,7 +12,7 @@
 - 突发流量来自内网还是外部？
 - 流量模式是否异常（如 DDoS 特征）？
 
-客户需要的是 **秒级的 flow-level 可见性** —— 能在大流量到来后 5-10 秒内识别 Top Talker，而不是等 5 分钟后看到一条聚合曲线。
+客户需要的是 **秒级的 flow-level 可见性** —— 能在大流量到来后 1-2 秒内触发告警、5 秒内识别 Top Talker，而不是等 5 分钟后看到一条聚合曲线。
 
 ## 方案概览
 
@@ -148,6 +148,35 @@ NLB → UDP 4789
 | L4 | 确定性采样 (PROBE_SAMPLE_RATE) | 紧急降级手段 |
 | L5 | Python fallback | .so 编译失败时仍可运行 |
 
+### 决策五：分离告警周期和报告周期，实现 1.5 秒检测延迟
+
+初始 C recvmmsg 版本中，worker 的 `cap_run()` 阻塞 5 秒收包，然后 coordinator 也独立地每 5 秒轮询一次队列。由于两个时钟不同步，最坏情况下检测延迟达到 10 秒 —— 反而比 Python 版本的 3 秒更差。
+
+```
+改造前 (两段 5s 阻塞叠加):
+  Worker:       |------cap_run 5s-------|------cap_run 5s-------|
+  Coordinator:  |--------sleep 5s--------|--------sleep 5s--------|
+  最坏延迟 = 5s + 5s = 10s
+```
+
+解决方案是将三个关注点分离：
+
+```
+改造后 (三层时钟分离):
+  Worker:       |-1s-|-1s-|-1s-|-1s-|-1s-|   CAP_FLUSH_INTERVAL=1s
+  Coordinator:  |.5|.5|.5|.5|.5|.5|.5|.5|   COORDINATOR_POLL=0.5s
+  Alert check:   ↑   ↑   ↑   ↑   ↑         每次 poll 都检查阈值
+  Full Report:  |----------5s-----------|   REPORT_INTERVAL=5s
+
+  最坏告警延迟 = 1s (cap_run) + 0.5s (poll) = 1.5s
+```
+
+- **CAP_FLUSH_INTERVAL = 1s**：worker 每秒 flush 一次 C hash table，数据更快进入队列
+- **COORDINATOR_POLL = 0.5s**：coordinator 高频轮询队列，每次都做 alert 阈值检查
+- **REPORT_INTERVAL = 5s**：Top-N 完整报告仍每 5 秒生成一次（含 IP enrichment，开销较大）
+
+关键洞察：告警检查只需要 `total_bytes` 和 `total_packets`，计算量极小（两次求和 + 一次比较），完全可以在每个 0.5s poll 周期执行。而 Top-N 排序、IP enrichment 等重操作仍保持 5 秒周期，不影响系统负载。
+
 ## 内核调优细节
 
 高速收包场景下，默认内核参数会成为瓶颈：
@@ -218,7 +247,8 @@ journalctl -u dx-probe | grep "Report:"
 ┌───────────────────────────────────────────────────────────┐
 │ 5.83M pps / 5.96 Gbps — 全部 32 个 worker 零丢包        │
 │ 等效: 46Gbps DX (1000B avg) — 超过 40Gbps 目标 16%      │
-│ 检测延迟: 5-10 秒（可配置 REPORT_INTERVAL 降至 2 秒）   │
+│ 告警延迟: 1.5 秒 (worst case)                           │
+┃   报告延迟: 5 秒 (Top-N 完整报告)                        ┃
 └───────────────────────────────────────────────────────────┘
 ```
 
@@ -228,7 +258,8 @@ journalctl -u dx-probe | grep "Report:"
 | 每 worker pps | 45,000 | 168,000+ | 3.7x |
 | 单实例总吞吐 | 360K pps | 2.68M pps | 7.4x |
 | 40Gbps 等效压测 | 17% 捕获 | 100% 捕获 | 零丢包 |
-| 检测延迟 | 5 分钟 (CloudWatch) | 5-10 秒 | 30-60x |
+| 告警延迟 | 5 分钟 (CloudWatch) | 1.5 秒 | **200x** |
+| 报告延迟 | 5 分钟 (CloudWatch) | 5 秒 | 60x |
 
 ## 成本分析
 
@@ -283,10 +314,15 @@ bash scripts/09-verify.sh
 
 ## 总结
 
-实时流量监控的核心挑战不是"能不能看到流量"，而是"能不能在流量到来的几秒内看到、看清、看全"。通过将收包热路径从 Python 移到 C，配合 SO_REUSEPORT 多进程无锁架构和 Traffic Mirroring 包截断，我们在标准 EC2 实例上实现了 5.8M pps 的线速处理能力，为 40Gbps DX 链路提供了秒级的 flow-level 可见性。
+实时流量监控的核心挑战不是"能不能看到流量"，而是"能不能在流量到来的 1-2 秒内看到、看清、看全"。通过将收包热路径从 Python 移到 C，配合 SO_REUSEPORT 多进程无锁架构、Traffic Mirroring 包截断，以及告警/报告周期分离，我们在标准 EC2 实例上实现了：
+
+- **5.8M pps** 线速处理（40Gbps DX 零丢包）
+- **1.5 秒** 告警延迟（从 CloudWatch 的 5 分钟提升 200 倍）
+- **5 秒** Top-N 报告粒度
 
 关键 takeaway：
 - **`recvmmsg` 是高速 UDP 收包的必备优化**，单次系统调用收 256 个包，摊薄开销
 - **SO_REUSEPORT 实现了真正的无锁并行**，比 epoll + 线程池更简洁高效
-- **包截断是被低估的优化手段**，128B 截断将 40Gbps 降至 5Gbps，代价几乎为零
+- **包截断是被低估的优化手段**，128B 截断将 40Gbps 降至 5Gbps，且不影响统计准确性（IP header 保留了原始 total_length）
+- **告警周期和报告周期应该分离** —— 告警只需简单阈值比较（0.5s 周期），Top-N 排序和 IP enrichment 可以低频执行（5s 周期）
 - **Python 适合编排，C 适合热路径** —— 混合架构兼顾开发效率和运行性能
