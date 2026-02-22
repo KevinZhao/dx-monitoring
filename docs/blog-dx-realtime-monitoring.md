@@ -63,6 +63,20 @@ DX 流量经过 VGW 进入 VPC 后，通过 GWLB 路由到 Appliance 实例。�
 - Traffic Mirroring 支持 `--packet-length 128` 参数，只复制包头前 128 字节
 - 40Gbps 的 DX 流量（avg 1000B），截断后仅 **5.12Gbps** 镜像流量 —— 减少 87%
 
+**包截断不影响统计准确性**。一个常见的疑问是：截断后字节数统计是否失真？答案是否。我们的解析器从 IP header 的 `total_length` 字段（offset 2-3）读取原始包长度，而非使用截断后的实际接收长度：
+
+```
+原始包 (1000B):  [IP hdr: total_length=1000] [payload 980B]
+截断后 (128B):   [VXLAN 8B][ETH 14B][IP hdr: total_length=1000 ← 保留][TCP ports...][截断]
+                                      ↑ 解析器读这里
+```
+
+因此 `bytes = sum(IP total_length)` 反映的是真实流量大小，`pps = count(packets)` 也完全准确。
+
+**Edge case：IP options + TCP options 超长导致端口截断。** 128B 的包减去 VXLAN(8B) + Ethernet(14B) 后剩余 106B 给 IP + Transport 头。正常情况下 IP(20B) + TCP(20B) = 40B，远在 106B 之内。但在极端情况下，如果 IP options 达到最大 40B（IHL=15）且 TCP options 也达到最大 40B（如同时携带 timestamps + SACK + window scale），则 IP header(60B) + TCP header(60B) = 120B > 106B，TCP 端口字段（位于 IP header 之后的前 4 字节）虽然仍在范围内，但 TCP 的高级选项会被截断。更极端的是，如果某些非标准协议栈在 IP options 中填充了最大长度且 transport header 格式异常，端口字段有可能落在 106B 之外。
+
+实际影响：**几乎为零**。现代互联网流量中，IP options 的使用率不到 0.01%（参见 [IMC 2015 研究](https://doi.org/10.1145/2815675.2815688)）。即使遇到这种包，唯一的后果是该 flow 被归类为 `(src_ip, dst_ip, proto, 0, 0)`，包计数和字节计数仍然正确，只是无法区分同一对 IP 之间的不同端口连接。如果对此仍有顾虑，可将 `--packet-length` 从 128 提升到 160，完全覆盖 IP options(60) + TCP header(60) = 120B 的最大情况，镜像流量仅增加 25%。
+
 ### 决策二：C recvmmsg 替代 Python recvfrom
 
 这是本方案最核心的技术点。初始版本使用 Python `socket.recvfrom()` 逐包接收，在压测中发现每次调用耗时约 20 微秒，每个 worker 进程上限仅 ~45K pps。即使有 8 个 worker 并行，单实例也只能处理 ~360K pps，远不够 40Gbps 场景。
