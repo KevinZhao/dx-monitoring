@@ -58,12 +58,34 @@ parse_subnets WORKLOAD_SUBNETS
 USERDATA=$(cat <<'UDEOF'
 #!/bin/bash
 set -ex
-yum install -y python3 python3-pip tcpdump
-# Optimize NIC for high packet rate
+yum install -y python3 python3-pip tcpdump gcc
+
+# --- NIC ring buffer & interrupt coalescing ---
 ethtool -G eth0 rx 4096 tx 4096 2>/dev/null || true
 ethtool -C eth0 rx-usecs 0 tx-usecs 0 2>/dev/null || true
-echo 16777216 > /proc/sys/net/core/rmem_max
-echo 16777216 > /proc/sys/net/core/rmem_default
+
+# --- Socket buffer: 256MB max, 128MB default ---
+echo 268435456 > /proc/sys/net/core/rmem_max
+echo 134217728 > /proc/sys/net/core/rmem_default
+
+# --- Kernel RX queue depth ---
+echo 300000 > /proc/sys/net/core/netdev_max_backlog
+
+# --- GRO aggregation ---
+ethtool -K eth0 gro on 2>/dev/null || true
+
+# --- RPS multi-core distribution ---
+CPUS=$(nproc)
+RPS_MASK=$(printf '%x' $(( (1 << CPUS) - 1 )))
+for f in /sys/class/net/eth0/queues/rx-*/rps_cpus; do
+    echo "$RPS_MASK" > "$f" 2>/dev/null || true
+done
+echo 65536 > /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null || true
+
+# --- Compile C parser if source exists ---
+if [[ -f /home/ec2-user/probe/fast_parse.c ]]; then
+    gcc -O2 -shared -fPIC -o /home/ec2-user/probe/fast_parse.so /home/ec2-user/probe/fast_parse.c
+fi
 UDEOF
 )
 

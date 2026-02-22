@@ -8,7 +8,7 @@ load_env
 
 # Deploy probe software to all Probe instances
 
-require_vars KEY_PAIR_NAME AWS_REGION SNS_TOPIC_ARN ALERT_THRESHOLD_BPS ALERT_THRESHOLD_PPS VPC_ID
+require_vars KEY_PAIR_NAME AWS_REGION ALERT_THRESHOLD_BPS ALERT_THRESHOLD_PPS VPC_ID
 
 KEY_FILE="$PROJECT_DIR/${KEY_PAIR_NAME}.pem"
 if [[ ! -f "$KEY_FILE" ]]; then
@@ -32,11 +32,16 @@ SSH_OPTS="-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o
 
 # Collect probe IPs from env-vars
 PROBE_IPS=()
-while IFS='=' read -r key value; do
-    if [[ "$key" =~ ^PROBE_PRIVATE_IP_ ]]; then
-        PROBE_IPS+=("$value")
+IDX=0
+while true; do
+    VAR_NAME="PROBE_PRIVATE_IP_${IDX}"
+    if [[ -n "${!VAR_NAME:-}" ]]; then
+        PROBE_IPS+=("${!VAR_NAME}")
+        IDX=$((IDX + 1))
+    else
+        break
     fi
-done < <(env | grep "^PROBE_PRIVATE_IP_" || true)
+done
 
 if [[ ${#PROBE_IPS[@]} -eq 0 ]]; then
     log_error "No PROBE_PRIVATE_IP_* variables found in env-vars.sh"
@@ -52,15 +57,18 @@ After=network.target
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/bin/python3 /home/ec2-user/probe/vxlan_probe.py
+ExecStart=/usr/bin/python3 /home/ec2-user/probe/multiproc_probe.py
 Restart=always
 RestartSec=5
+LimitNOFILE=1048576
 Environment=AWS_REGION=${AWS_REGION}
 Environment=SNS_TOPIC_ARN=${SNS_TOPIC_ARN}
 Environment=ALERT_THRESHOLD_BPS=${ALERT_THRESHOLD_BPS}
 Environment=ALERT_THRESHOLD_PPS=${ALERT_THRESHOLD_PPS}
 Environment=SLACK_WEBHOOK_URL=${SLACK_WEBHOOK_URL:-}
 Environment=VPC_ID=${VPC_ID}
+Environment=PROBE_WORKERS=0
+Environment=PROBE_SAMPLE_RATE=1.0
 
 [Install]
 WantedBy=multi-user.target"

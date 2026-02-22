@@ -70,6 +70,7 @@ for ENI in $ENIS; do
       --traffic-mirror-filter-id "$MIRROR_FILTER_ID" \
       --session-number "$SESSION_NUM" \
       --virtual-network-id "$MIRROR_VNI" \
+      --packet-length 128 \
       --tag-specifications "ResourceType=traffic-mirror-session,Tags=[{Key=Project,Value=${PROJECT_TAG}}]" \
       --query 'TrafficMirrorSession.TrafficMirrorSessionId' --output text)
 
