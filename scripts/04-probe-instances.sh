@@ -8,6 +8,51 @@ load_env
 
 require_vars AMI_ID PROBE_SG_ID WORKLOAD_SUBNETS PROBE_INSTANCE_TYPE KEY_PAIR_NAME
 
+# --- IAM Instance Profile for Probe ---
+PROBE_ROLE_NAME="dx-probe-role-${PROJECT_TAG}"
+
+if check_var_exists PROBE_INSTANCE_PROFILE; then
+    log_info "Probe IAM profile already exists: $PROBE_INSTANCE_PROFILE"
+else
+    log_info "Creating IAM role for Probe instances..."
+
+    TRUST_POLICY='{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}'
+
+    aws iam create-role \
+        --role-name "$PROBE_ROLE_NAME" \
+        --assume-role-policy-document "$TRUST_POLICY" \
+        --tags "Key=Project,Value=${PROJECT_TAG}" 2>/dev/null \
+        || log_info "IAM role already exists"
+
+    PROBE_POLICY='{
+        "Version":"2012-10-17",
+        "Statement":[
+            {"Effect":"Allow","Action":["ec2:DescribeInstances","ec2:DescribeNetworkInterfaces"],"Resource":"*"},
+            {"Effect":"Allow","Action":"sns:Publish","Resource":"'"${SNS_TOPIC_ARN:-*}"'"}
+        ]
+    }'
+    aws iam put-role-policy \
+        --role-name "$PROBE_ROLE_NAME" \
+        --policy-name "dx-probe-policy" \
+        --policy-document "$PROBE_POLICY"
+
+    aws iam create-instance-profile \
+        --instance-profile-name "$PROBE_ROLE_NAME" 2>/dev/null || true
+    aws iam add-role-to-instance-profile \
+        --instance-profile-name "$PROBE_ROLE_NAME" \
+        --role-name "$PROBE_ROLE_NAME" 2>/dev/null || true
+
+    # IAM propagation delay
+    log_info "Waiting for IAM profile propagation..."
+    sleep 10
+
+    save_var PROBE_INSTANCE_PROFILE "$PROBE_ROLE_NAME"
+    save_var PROBE_IAM_ROLE_NAME "$PROBE_ROLE_NAME"
+    log_info "Created IAM profile: $PROBE_ROLE_NAME"
+fi
+
+load_env
+
 parse_subnets WORKLOAD_SUBNETS
 
 USERDATA=$(cat <<'UDEOF'
@@ -43,6 +88,7 @@ for AZ in "${AZ_LIST[@]}"; do
     --security-group-ids "$PROBE_SG_ID" \
     --subnet-id "$SUBNET_ID" \
     --user-data "$USERDATA_B64" \
+    --iam-instance-profile "Name=${PROBE_INSTANCE_PROFILE}" \
     --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=dx-probe-${AZ}},{Key=Project,Value=${PROJECT_TAG}}]" \
     --query 'Instances[0].InstanceId' --output text)
 

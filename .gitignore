@@ -1,0 +1,6 @@
+*.pem
+*.key
+env-vars.sh
+tests/test-env-vars.sh
+__pycache__/
+*.pyc

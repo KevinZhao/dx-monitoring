@@ -16,13 +16,19 @@ if [[ ! -f "$KEY_FILE" ]]; then
     exit 1
 fi
 
+KEY_PERMS=$(stat -c "%a" "$KEY_FILE" 2>/dev/null || stat -f "%Lp" "$KEY_FILE" 2>/dev/null)
+if [[ "$KEY_PERMS" != "600" && "$KEY_PERMS" != "400" ]]; then
+    log_warn "Key file has permissions $KEY_PERMS, fixing to 600"
+    chmod 600 "$KEY_FILE"
+fi
+
 PROBE_DIR="$PROJECT_DIR/probe"
 if [[ ! -d "$PROBE_DIR" ]]; then
     log_error "Probe directory not found: $PROBE_DIR"
     exit 1
 fi
 
-SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=30 -i $KEY_FILE"
+SSH_OPTS="-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o ConnectTimeout=30 -i $KEY_FILE"
 
 # Collect probe IPs from env-vars
 PROBE_IPS=()

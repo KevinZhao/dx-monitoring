@@ -22,7 +22,7 @@ require_vars TRAFFIC_GEN_IP_0 TRAFFIC_GEN_IP_1 TRAFFIC_GEN_IP_2 TRAFFIC_GEN_IP_3
              BIZ_HOST_IP_0 BIZ_HOST_IP_1 BIZ_HOST_IP_2 KEY_PAIR_NAME
 
 KEY_FILE="$PROJECT_DIR/${KEY_PAIR_NAME}.pem"
-SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 -i $KEY_FILE"
+SSH_OPTS="-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 -i $KEY_FILE"
 
 ssh_probe() {
     local ip="$1"; shift

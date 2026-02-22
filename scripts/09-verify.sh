@@ -203,7 +203,7 @@ fi
 
 # SSH probe service check
 KEY_FILE="$PROJECT_DIR/${KEY_PAIR_NAME}.pem"
-SSH_OPTS="-o StrictHostKeyChecking=no -o ConnectTimeout=10 -i $KEY_FILE"
+SSH_OPTS="-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -i $KEY_FILE"
 
 while IFS='=' read -r key value; do
     if [[ "$key" =~ ^PROBE_PRIVATE_IP_ ]]; then

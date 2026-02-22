@@ -330,11 +330,22 @@ fi
 # ================================================================
 # Step 7: Verify main VPC has return route via VGW
 # ================================================================
-log_info "=== Step 7: Verifying Return Route ==="
+log_info "=== Step 7: Enabling VGW Route Propagation + Verifying Return Route ==="
 
 BUSINESS_RTBS=$(aws ec2 describe-route-tables \
     --filters "Name=vpc-id,Values=${VPC_ID}" \
     --region "$AWS_REGION" --query 'RouteTables[].RouteTableId' --output text)
+
+# Enable VGW route propagation on all route tables in monitoring VPC
+for RTB_ID in $BUSINESS_RTBS; do
+    aws ec2 enable-vgw-route-propagation \
+        --route-table-id "$RTB_ID" --gateway-id "$VGW_ID" \
+        --region "$AWS_REGION" 2>/dev/null || true
+    log_info "Enabled VGW route propagation on $RTB_ID"
+done
+
+# Wait for propagation
+sleep 5
 
 FOUND_RETURN=false
 for RTB_ID in $BUSINESS_RTBS; do
@@ -344,14 +355,13 @@ for RTB_ID in $BUSINESS_RTBS; do
         --output text 2>/dev/null || true)
     if [[ -n "$RETURN_ROUTE" && "$RETURN_ROUTE" != "None" ]]; then
         FOUND_RETURN=true
-        log_info "Return route to $ONPREM_VPC_CIDR via VGW found in $RTB_ID"
+        log_info "Return route to $ONPREM_VPC_CIDR via VGW confirmed in $RTB_ID"
         break
     fi
 done
 
 if [[ "$FOUND_RETURN" == "false" ]]; then
-    log_warn "No return route to $ONPREM_VPC_CIDR via VGW found"
-    log_warn "Ensure VGW route propagation is enabled on business subnet route tables"
+    log_warn "Return route to $ONPREM_VPC_CIDR not yet propagated. VPN may need more time."
 fi
 
 # ================================================================

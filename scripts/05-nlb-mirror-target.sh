@@ -6,7 +6,26 @@ source "$SCRIPT_DIR/lib/common.sh"
 load_config
 load_env
 
-require_vars VPC_ID WORKLOAD_SUBNETS PROBE_INSTANCE_ID_0 PROBE_INSTANCE_ID_1
+require_vars VPC_ID WORKLOAD_SUBNETS
+
+# Dynamically discover all probe instances
+PROBE_INSTANCE_IDS=()
+IDX=0
+while true; do
+    VAR_NAME="PROBE_INSTANCE_ID_${IDX}"
+    if [[ -n "${!VAR_NAME:-}" ]]; then
+        PROBE_INSTANCE_IDS+=("${!VAR_NAME}")
+        IDX=$((IDX + 1))
+    else
+        break
+    fi
+done
+
+if [[ ${#PROBE_INSTANCE_IDS[@]} -eq 0 ]]; then
+    log_error "No PROBE_INSTANCE_ID_* variables found in env-vars.sh"
+    exit 1
+fi
+log_info "Found ${#PROBE_INSTANCE_IDS[@]} probe instance(s)"
 
 parse_subnets WORKLOAD_SUBNETS
 
@@ -82,10 +101,14 @@ fi
 
 # --- Register Targets ---
 log_info "Registering probe instances as targets..."
+TARGETS=()
+for IID in "${PROBE_INSTANCE_IDS[@]}"; do
+    TARGETS+=("Id=${IID}")
+done
 aws elbv2 register-targets \
-  --target-group-arn "$MIRROR_TG_ARN" \
-  --targets "Id=${PROBE_INSTANCE_ID_0}" "Id=${PROBE_INSTANCE_ID_1}"
-log_info "Registered probe instances"
+    --target-group-arn "$MIRROR_TG_ARN" \
+    --targets "${TARGETS[@]}"
+log_info "Registered ${#PROBE_INSTANCE_IDS[@]} probe instance(s)"
 
 # --- Wait for NLB active ---
 log_info "Waiting for NLB to become active..."

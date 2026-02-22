@@ -27,7 +27,7 @@ if [[ ! -f "$KEY_FILE" ]]; then
     exit 1
 fi
 
-SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 -i $KEY_FILE"
+SSH_OPTS="-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 -i $KEY_FILE"
 JUMP_HOST="ec2-user@${CGW_EIP}"
 
 ssh_gen() {

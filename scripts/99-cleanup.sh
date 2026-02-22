@@ -175,7 +175,24 @@ for SG_VAR in APPLIANCE_SG_ID PROBE_SG_ID; do
     fi
 done
 
-# 13. Remove env-vars.sh
+# 13. IAM Role + Instance Profile
+if [[ -n "${PROBE_IAM_ROLE_NAME:-}" ]]; then
+    cleanup_step "Remove role from instance profile" \
+        aws iam remove-role-from-instance-profile \
+            --instance-profile-name "$PROBE_IAM_ROLE_NAME" \
+            --role-name "$PROBE_IAM_ROLE_NAME"
+    cleanup_step "Delete instance profile $PROBE_IAM_ROLE_NAME" \
+        aws iam delete-instance-profile \
+            --instance-profile-name "$PROBE_IAM_ROLE_NAME"
+    cleanup_step "Delete inline policy on $PROBE_IAM_ROLE_NAME" \
+        aws iam delete-role-policy \
+            --role-name "$PROBE_IAM_ROLE_NAME" \
+            --policy-name "dx-probe-policy"
+    cleanup_step "Delete IAM role $PROBE_IAM_ROLE_NAME" \
+        aws iam delete-role --role-name "$PROBE_IAM_ROLE_NAME"
+fi
+
+# 14. Remove env-vars.sh
 ENV_FILE="$PROJECT_DIR/env-vars.sh"
 if [[ -f "$ENV_FILE" ]]; then
     cleanup_step "env-vars.sh" rm -f "$ENV_FILE"

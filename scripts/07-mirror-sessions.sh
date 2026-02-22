@@ -8,6 +8,19 @@ load_env
 
 require_vars MIRROR_TARGET_ID MIRROR_FILTER_ID MIRROR_VNI PROJECT_TAG
 
+# --- Wait for Appliance instances to be ready ---
+IDX=0
+while true; do
+    VAR_NAME="APPLIANCE_INSTANCE_ID_${IDX}"
+    if [[ -n "${!VAR_NAME:-}" ]]; then
+        log_info "Waiting for appliance ${!VAR_NAME} status checks..."
+        aws ec2 wait instance-status-ok --instance-ids "${!VAR_NAME}" 2>/dev/null || true
+        IDX=$((IDX + 1))
+    else
+        break
+    fi
+done
+
 # --- Discover Appliance ENIs ---
 log_info "Discovering appliance ENIs..."
 ENIS=$(aws ec2 describe-instances \
@@ -27,7 +40,6 @@ log_info "Found appliance ENIs: $ENIS"
 
 # --- Create mirror sessions ---
 SESSION_IDS=()
-SESSION_NUM=1
 
 for ENI in $ENIS; do
   log_info "Processing ENI: $ENI"
@@ -42,6 +54,15 @@ for ENI in $ENIS; do
     log_info "Mirror session already exists for $ENI: $EXISTING"
     SESSION_IDS+=("$EXISTING")
   else
+    # Find first available session number for this ENI
+    USED_NUMS=$(aws ec2 describe-traffic-mirror-sessions \
+      --filters "Name=network-interface-id,Values=${ENI}" \
+      --query 'TrafficMirrorSessions[].SessionNumber' --output text 2>/dev/null || true)
+    SESSION_NUM=1
+    while echo "$USED_NUMS" | grep -qw "$SESSION_NUM" 2>/dev/null; do
+      SESSION_NUM=$((SESSION_NUM + 1))
+    done
+
     log_info "Creating mirror session for $ENI (session-number=$SESSION_NUM)"
     SESSION_ID=$(aws ec2 create-traffic-mirror-session \
       --network-interface-id "$ENI" \
@@ -55,8 +76,6 @@ for ENI in $ENIS; do
     log_info "Created mirror session: $SESSION_ID"
     SESSION_IDS+=("$SESSION_ID")
   fi
-
-  SESSION_NUM=$((SESSION_NUM + 1))
 done
 
 # Save comma-separated list of session IDs
