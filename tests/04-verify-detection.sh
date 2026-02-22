@@ -6,7 +6,6 @@ source "$PROJECT_DIR/scripts/lib/common.sh"
 load_config
 load_env
 
-# Source test environment
 TEST_ENV_FILE="$SCRIPT_DIR/test-env-vars.sh"
 if [[ ! -f "$TEST_ENV_FILE" ]]; then
     log_error "Test env file not found: $TEST_ENV_FILE"
@@ -15,69 +14,45 @@ fi
 source "$TEST_ENV_FILE"
 
 TEST_CONF="$SCRIPT_DIR/test-env.conf"
-if [[ -f "$TEST_CONF" ]]; then
-    source "$TEST_CONF"
-fi
+[[ -f "$TEST_CONF" ]] && source "$TEST_CONF"
 
-TRAFFIC_DURATION="${TRAFFIC_DURATION:-30}"
+TRAFFIC_DURATION="${TRAFFIC_DURATION:-120}"
 
-require_vars TRAFFIC_GEN_IP_0 TRAFFIC_GEN_IP_1 TRAFFIC_GEN_IP_2 \
-             BIZ_HOST_IP_0 BIZ_HOST_IP_1 KEY_PAIR_NAME
+require_vars TRAFFIC_GEN_IP_0 TRAFFIC_GEN_IP_1 TRAFFIC_GEN_IP_2 TRAFFIC_GEN_IP_3 TRAFFIC_GEN_IP_4 \
+             BIZ_HOST_IP_0 BIZ_HOST_IP_1 BIZ_HOST_IP_2 KEY_PAIR_NAME
 
 KEY_FILE="$PROJECT_DIR/${KEY_PAIR_NAME}.pem"
 SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15 -i $KEY_FILE"
 
-# SSH helper: probe instances are in private subnets, use SSM or direct access
-# depending on network reachability. Try direct first, fall back to SSM.
 ssh_probe() {
-    local ip="$1"
-    shift
+    local ip="$1"; shift
     ssh $SSH_OPTS "ec2-user@${ip}" "$@" 2>/dev/null
 }
 
-PASS=0
-FAIL=0
-TOTAL=0
+PASS=0; FAIL=0; TOTAL=0
 
-check_pass() {
-    local desc="$1"
-    PASS=$((PASS + 1))
-    TOTAL=$((TOTAL + 1))
-    echo -e "  \033[32m[PASS]\033[0m $desc"
-}
+check_pass() { PASS=$((PASS+1)); TOTAL=$((TOTAL+1)); echo -e "  \033[32m[PASS]\033[0m $1"; }
+check_fail() { FAIL=$((FAIL+1)); TOTAL=$((TOTAL+1)); echo -e "  \033[31m[FAIL]\033[0m $1"; }
+stage_header() { echo ""; echo -e "\033[1;36m=== Stage $1: $2 ===\033[0m"; }
 
-check_fail() {
-    local desc="$1"
-    FAIL=$((FAIL + 1))
-    TOTAL=$((TOTAL + 1))
-    echo -e "  \033[31m[FAIL]\033[0m $desc"
-}
-
-stage_header() {
-    echo ""
-    echo -e "\033[1;36m=== Stage $1: $2 ===\033[0m"
-}
-
-# ========== Stage 1: Wait for probe aggregation flush ==========
+# ========== Stage 1: Wait for flush ==========
 stage_header 1 "Wait for Probe Processing"
-log_info "Sleeping 15s for probe to flush aggregation window..."
+log_info "Sleeping 15s for probe aggregation flush..."
 sleep 15
 
 # ========== Stage 2: Collect probe output ==========
 stage_header 2 "Collect Probe Output"
 
-# Calculate how far back to look in journal
 LOOKBACK_MINUTES=$(( (TRAFFIC_DURATION + 60) / 60 + 2 ))
 
 PROBE_IPS=()
 while IFS='=' read -r key value; do
-    if [[ "$key" =~ ^PROBE_PRIVATE_IP_ ]]; then
-        PROBE_IPS+=("$value")
-    fi
-done < <(env | grep "^PROBE_PRIVATE_IP_" || true)
+    value="${value//\"/}"
+    [[ -n "$value" ]] && PROBE_IPS+=("$value")
+done < <(grep "^PROBE_PRIVATE_IP_" "$PROJECT_DIR/env-vars.sh" 2>/dev/null || true)
 
 if [[ ${#PROBE_IPS[@]} -eq 0 ]]; then
-    log_error "No PROBE_PRIVATE_IP_* variables found"
+    log_error "No PROBE_PRIVATE_IP_* found in env-vars.sh"
     exit 1
 fi
 
@@ -91,134 +66,132 @@ for i in "${!PROBE_IPS[@]}"; do
     ssh_probe "${IP}" \
         "sudo journalctl -u dx-probe --since '${LOOKBACK_MINUTES} minutes ago' --no-pager" \
         > "$OUTPUT_FILE" || true
-
     LINE_COUNT=$(wc -l < "$OUTPUT_FILE")
-    log_info "Probe-${i} ($IP): ${LINE_COUNT} log lines collected"
+    log_info "Probe-${i} ($IP): ${LINE_COUNT} lines"
     cat "$OUTPUT_FILE" >> "$COMBINED_LOG"
 done
 
-# ========== Stage 3: Parse and verify rankings ==========
-stage_header 3 "Verify Traffic Rankings"
+# ========== Stage 3: Verify source rankings ==========
+stage_header 3 "Verify Source Rankings"
 
-# Extract Report lines containing top_src
 REPORT_LINES=$(grep "Report:" "$COMBINED_LOG" 2>/dev/null || true)
 REPORT_COUNT=$(echo "$REPORT_LINES" | grep -c "Report:" 2>/dev/null || echo "0")
-log_info "Found $REPORT_COUNT Report entries in probe logs"
+log_info "Found $REPORT_COUNT Report entries"
 
 if [[ "$REPORT_COUNT" -eq 0 ]]; then
     check_fail "No Report entries found in probe logs"
 else
-    check_pass "Report entries found in probe logs ($REPORT_COUNT)"
+    check_pass "Report entries found ($REPORT_COUNT)"
 fi
 
-# Check Gen-0 (HIGH) appears in top sources
-if grep -q "$TRAFFIC_GEN_IP_0" "$COMBINED_LOG" 2>/dev/null; then
-    check_pass "Gen-0 ($TRAFFIC_GEN_IP_0) appears in probe logs"
-else
-    check_fail "Gen-0 ($TRAFFIC_GEN_IP_0) not found in probe logs"
-fi
+# Check each generator IP appears in logs
+ALL_GEN_IPS=("$TRAFFIC_GEN_IP_0" "$TRAFFIC_GEN_IP_1" "$TRAFFIC_GEN_IP_2" "$TRAFFIC_GEN_IP_3" "$TRAFFIC_GEN_IP_4")
+GEN_LABELS=("Gen-0(500M)" "Gen-1(200M)" "Gen-2(100M)" "Gen-3(50M)" "Gen-4(HTTP)")
 
-# Check Gen-1 (MEDIUM) appears in probe logs
-if grep -q "$TRAFFIC_GEN_IP_1" "$COMBINED_LOG" 2>/dev/null; then
-    check_pass "Gen-1 ($TRAFFIC_GEN_IP_1) appears in probe logs"
-else
-    check_fail "Gen-1 ($TRAFFIC_GEN_IP_1) not found in probe logs"
-fi
-
-# Check Gen-2 (LOW) appears in probe logs
-if grep -q "$TRAFFIC_GEN_IP_2" "$COMBINED_LOG" 2>/dev/null; then
-    check_pass "Gen-2 ($TRAFFIC_GEN_IP_2) appears in probe logs"
-else
-    check_fail "Gen-2 ($TRAFFIC_GEN_IP_2) not found in probe logs"
-fi
-
-# Check BIZ_HOST_IP_0 appears in top destinations (both iperf3 targets)
-if grep -q "$BIZ_HOST_IP_0" "$COMBINED_LOG" 2>/dev/null; then
-    check_pass "Biz-host-0 ($BIZ_HOST_IP_0) appears in probe logs (iperf3 target)"
-else
-    check_fail "Biz-host-0 ($BIZ_HOST_IP_0) not found in probe logs"
-fi
-
-# Verify Gen-0 bytes > Gen-1 bytes by parsing top_src entries
-# The probe logs top_src as: top_src=[('ip', bytes), ...]
-# Extract the most recent Report line with both IPs to compare
-GEN0_MAX_BYTES=0
-GEN1_MAX_BYTES=0
-
-while IFS= read -r line; do
-    # Extract bytes for Gen-0 from top_src tuples: ('10.x.x.x', 12345)
-    gen0_bytes=$(echo "$line" | grep -oP "'${TRAFFIC_GEN_IP_0//./\\.}',\s*\K[0-9]+" | head -1 || true)
-    gen1_bytes=$(echo "$line" | grep -oP "'${TRAFFIC_GEN_IP_1//./\\.}',\s*\K[0-9]+" | head -1 || true)
-
-    if [[ -n "$gen0_bytes" && "$gen0_bytes" -gt "$GEN0_MAX_BYTES" ]]; then
-        GEN0_MAX_BYTES="$gen0_bytes"
-    fi
-    if [[ -n "$gen1_bytes" && "$gen1_bytes" -gt "$GEN1_MAX_BYTES" ]]; then
-        GEN1_MAX_BYTES="$gen1_bytes"
-    fi
-done <<< "$REPORT_LINES"
-
-log_info "Gen-0 max bytes in window: $GEN0_MAX_BYTES"
-log_info "Gen-1 max bytes in window: $GEN1_MAX_BYTES"
-
-if [[ "$GEN0_MAX_BYTES" -gt 0 && "$GEN1_MAX_BYTES" -gt 0 ]]; then
-    if [[ "$GEN0_MAX_BYTES" -gt "$GEN1_MAX_BYTES" ]]; then
-        check_pass "Gen-0 bytes ($GEN0_MAX_BYTES) > Gen-1 bytes ($GEN1_MAX_BYTES) - ranking correct"
+for idx in "${!ALL_GEN_IPS[@]}"; do
+    if grep -q "${ALL_GEN_IPS[$idx]}" "$COMBINED_LOG" 2>/dev/null; then
+        check_pass "${GEN_LABELS[$idx]} (${ALL_GEN_IPS[$idx]}) appears in probe logs"
     else
-        check_fail "Gen-0 bytes ($GEN0_MAX_BYTES) <= Gen-1 bytes ($GEN1_MAX_BYTES) - ranking incorrect"
+        check_fail "${GEN_LABELS[$idx]} (${ALL_GEN_IPS[$idx]}) not found in probe logs"
     fi
-elif [[ "$GEN0_MAX_BYTES" -gt 0 ]]; then
-    check_pass "Gen-0 bytes ($GEN0_MAX_BYTES) > Gen-1 (not in top_src) - Gen-0 dominant"
+done
+
+# Extract bytes per source from top_src tuples: ('ip', bytes)
+extract_max_bytes() {
+    local ip="$1"
+    local escaped_ip="${ip//./\\.}"
+    local max_bytes=0
+    while IFS= read -r line; do
+        local b
+        b=$(echo "$line" | grep -oP "'${escaped_ip}',\s*\K[0-9]+" | head -1 || true)
+        if [[ -n "$b" && "$b" -gt "$max_bytes" ]]; then
+            max_bytes="$b"
+        fi
+    done <<< "$REPORT_LINES"
+    echo "$max_bytes"
+}
+
+GEN0_BYTES=$(extract_max_bytes "$TRAFFIC_GEN_IP_0")
+GEN1_BYTES=$(extract_max_bytes "$TRAFFIC_GEN_IP_1")
+GEN2_BYTES=$(extract_max_bytes "$TRAFFIC_GEN_IP_2")
+GEN3_BYTES=$(extract_max_bytes "$TRAFFIC_GEN_IP_3")
+
+log_info "Peak bytes per window: Gen-0=$GEN0_BYTES Gen-1=$GEN1_BYTES Gen-2=$GEN2_BYTES Gen-3=$GEN3_BYTES"
+
+# Verify ranking: Gen-0 > Gen-1 > Gen-2 > Gen-3
+if [[ "$GEN0_BYTES" -gt 0 && "$GEN1_BYTES" -gt 0 && "$GEN0_BYTES" -gt "$GEN1_BYTES" ]]; then
+    check_pass "Gen-0($GEN0_BYTES) > Gen-1($GEN1_BYTES) - top source correct"
 else
-    check_fail "Could not extract byte counts for ranking comparison"
+    check_fail "Gen-0($GEN0_BYTES) should be > Gen-1($GEN1_BYTES)"
 fi
 
-# ========== Stage 4: Check alert triggering ==========
-stage_header 4 "Alert Verification"
+if [[ "$GEN1_BYTES" -gt 0 && "$GEN2_BYTES" -gt 0 && "$GEN1_BYTES" -gt "$GEN2_BYTES" ]]; then
+    check_pass "Gen-1($GEN1_BYTES) > Gen-2($GEN2_BYTES) - second source correct"
+else
+    check_fail "Gen-1($GEN1_BYTES) should be > Gen-2($GEN2_BYTES)"
+fi
+
+if [[ "$GEN2_BYTES" -gt 0 && "$GEN3_BYTES" -gt 0 && "$GEN2_BYTES" -gt "$GEN3_BYTES" ]]; then
+    check_pass "Gen-2($GEN2_BYTES) > Gen-3($GEN3_BYTES) - third source correct"
+else
+    check_fail "Gen-2($GEN2_BYTES) should be > Gen-3($GEN3_BYTES)"
+fi
+
+# ========== Stage 4: Verify destination rankings ==========
+stage_header 4 "Verify Destination Rankings"
+
+# biz-0 receives 500M+200M=700M, should be top destination
+ALL_BIZ_IPS=("$BIZ_HOST_IP_0" "$BIZ_HOST_IP_1" "$BIZ_HOST_IP_2")
+BIZ_LABELS=("biz-0(700M target)" "biz-1(100M+ target)" "biz-2(50M+ target)")
+
+for idx in "${!ALL_BIZ_IPS[@]}"; do
+    if grep -q "${ALL_BIZ_IPS[$idx]}" "$COMBINED_LOG" 2>/dev/null; then
+        check_pass "${BIZ_LABELS[$idx]} (${ALL_BIZ_IPS[$idx]}) appears in probe logs"
+    else
+        check_fail "${BIZ_LABELS[$idx]} (${ALL_BIZ_IPS[$idx]}) not found in probe logs"
+    fi
+done
+
+# ========== Stage 5: Alert verification ==========
+stage_header 5 "Alert Verification"
 
 ALERT_THRESHOLD_BPS="${ALERT_THRESHOLD_BPS:-1000000000}"
-# 500Mbps = 500000000 bps
 if [[ "$ALERT_THRESHOLD_BPS" -lt 500000000 ]]; then
     ALERT_LINES=$(grep -c "ALERT triggered" "$COMBINED_LOG" 2>/dev/null || echo "0")
     if [[ "$ALERT_LINES" -gt 0 ]]; then
-        check_pass "Alert triggered ($ALERT_LINES occurrences) - threshold ${ALERT_THRESHOLD_BPS} bps < 500Mbps"
+        check_pass "Alert triggered ($ALERT_LINES occurrences)"
     else
-        check_fail "Alert not triggered despite threshold ${ALERT_THRESHOLD_BPS} bps < 500Mbps traffic"
+        check_fail "Alert not triggered (threshold=${ALERT_THRESHOLD_BPS} < 500Mbps)"
     fi
 else
-    log_info "Alert threshold (${ALERT_THRESHOLD_BPS} bps) >= 500Mbps, skipping alert check"
+    log_info "Alert threshold (${ALERT_THRESHOLD_BPS}) >= 500Mbps, skip alert check"
 fi
 
-# ========== Stage 5: Summary ==========
-stage_header 5 "Summary"
+# ========== Stage 6: Summary ==========
+stage_header 6 "Summary"
 
-# Print top-5 sources for visual inspection
 echo ""
-echo -e "\033[1m--- Top Sources (from latest Report entries) ---\033[0m"
-LATEST_REPORT=$(echo "$REPORT_LINES" | tail -5)
-if [[ -n "$LATEST_REPORT" ]]; then
-    echo "$LATEST_REPORT" | while IFS= read -r line; do
-        # Extract just the top_src portion
-        src_part=$(echo "$line" | grep -oP 'top_src=\K\[.*?\]' || true)
-        if [[ -n "$src_part" ]]; then
-            echo "  $src_part"
-        fi
-    done
-else
-    echo "  (no report data available)"
-fi
-echo ""
+echo -e "\033[1m--- Latest Top Sources ---\033[0m"
+echo "$REPORT_LINES" | tail -3 | while IFS= read -r line; do
+    src_part=$(echo "$line" | grep -oP 'top_src=\K\[.*?\]' || true)
+    [[ -n "$src_part" ]] && echo "  $src_part"
+done
 
+echo ""
+echo -e "\033[1m--- Latest Top Destinations ---\033[0m"
+echo "$REPORT_LINES" | tail -3 | while IFS= read -r line; do
+    dst_part=$(echo "$line" | grep -oP 'top_dst=\K\[.*?\]' || true)
+    [[ -n "$dst_part" ]] && echo "  $dst_part"
+done
+
+echo ""
 echo -e "\033[1m=== Verification Results ===\033[0m"
-echo -e "  Total checks: $TOTAL"
-echo -e "  \033[32mPassed: $PASS\033[0m"
-echo -e "  \033[31mFailed: $FAIL\033[0m"
-echo ""
+echo -e "  Total: $TOTAL | \033[32mPassed: $PASS\033[0m | \033[31mFailed: $FAIL\033[0m"
 
 if [[ $FAIL -gt 0 ]]; then
-    log_warn "${PASS}/${TOTAL} verification checks passed (${FAIL} failed)"
+    log_warn "${PASS}/${TOTAL} checks passed (${FAIL} failed)"
     exit 1
 else
-    log_info "${PASS}/${TOTAL} verification checks passed"
+    log_info "${PASS}/${TOTAL} checks passed"
     exit 0
 fi

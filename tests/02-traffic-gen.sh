@@ -50,7 +50,7 @@ test_check_var_exists() {
 test_load_env
 
 require_vars AWS_REGION AMI_ID KEY_PAIR_NAME PROJECT_TAG ADMIN_CIDR
-require_vars ONPREM_VPC_ID ONPREM_VPC_CIDR ONPREM_PRIVATE_SUBNET_ID
+require_vars ONPREM_VPC_ID ONPREM_VPC_CIDR ONPREM_SUBNET_ID
 
 log_info "=== Launching Traffic Generator Instances ==="
 
@@ -110,14 +110,14 @@ for i in $(seq 0 $((TRAFFIC_GEN_COUNT - 1))); do
 
     INSTANCE_NAME="dx-traffic-gen-${i}"
 
-    log_info "Launching traffic gen $i in on-prem private subnet $ONPREM_PRIVATE_SUBNET_ID"
+    log_info "Launching traffic gen $i in on-prem private subnet $ONPREM_SUBNET_ID"
 
     INSTANCE_ID=$(aws ec2 run-instances \
         --image-id "$AMI_ID" \
         --instance-type "$TRAFFIC_GEN_INSTANCE_TYPE" \
         --key-name "$KEY_PAIR_NAME" \
         --security-group-ids "$TRAFFIC_GEN_SG_ID" \
-        --subnet-id "$ONPREM_PRIVATE_SUBNET_ID" \
+        --subnet-id "$ONPREM_SUBNET_ID" \
         --user-data "$GEN_USERDATA_B64" \
         --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${INSTANCE_NAME}},{Key=Project,Value=${PROJECT_TAG}},{Key=Role,Value=test-gen}]" \
         --region "$AWS_REGION" \
