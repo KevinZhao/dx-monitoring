@@ -36,7 +36,9 @@ IP_HDR_MIN_LEN = 20
 
 FlowKey = tuple[str, str, int, int, int]  # src_ip, dst_ip, proto, src_port, dst_port
 
-REPORT_INTERVAL = 5.0  # seconds
+REPORT_INTERVAL = 5.0  # seconds — full report with Top-N
+CAP_FLUSH_INTERVAL = 1.0  # seconds — worker flush cycle (controls detection latency)
+COORDINATOR_POLL = 0.5  # seconds — coordinator queue poll interval
 BIND_ADDR = "0.0.0.0"
 BIND_PORT = 4789
 RCVBUF_SIZE = 128 * 1024 * 1024  # 128 MB
@@ -177,12 +179,12 @@ def _worker_c(
     wlog.info("Worker-%d socket SO_RCVBUF=%d", worker_idx, rcvbuf)
 
     ip_buf = ctypes.create_string_buffer(16)
-    duration_ms = int(REPORT_INTERVAL * 1000)
+    duration_ms = int(CAP_FLUSH_INTERVAL * 1000)
     inv_rate = 1.0 / sample_rate if sample_rate < 1.0 else 1.0
 
     try:
         while not stop_event.is_set():
-            # Capture for REPORT_INTERVAL seconds (C does recvmmsg + parse + aggregate)
+            # Capture for CAP_FLUSH_INTERVAL seconds (C does recvmmsg + parse + aggregate)
             total_pkts = lib.cap_run(ctx, duration_ms)
 
             # Flush C hash table → flow_record array
@@ -378,11 +380,43 @@ class Coordinator:
         logger.info("Coordinator stopped")
 
     def _run_loop(self) -> None:
+        accumulated: dict[FlowKey, list[int]] = defaultdict(lambda: [0, 0])
+        last_report = time.monotonic()
+        accum_interval = 0.0
+
         while not self._stop_event.is_set():
-            time.sleep(REPORT_INTERVAL)
-            merged = self._drain_queues()
-            if merged:
-                self._report(merged)
+            time.sleep(COORDINATOR_POLL)
+            accum_interval += COORDINATOR_POLL
+
+            # Drain worker queues into accumulator
+            fresh = self._drain_queues()
+            if fresh:
+                for key, counters in fresh.items():
+                    entry = accumulated[key]
+                    entry[0] += counters[0]
+                    entry[1] += counters[1]
+
+                # Quick alert check on every poll (low-latency detection)
+                total_bytes = sum(v[1] for v in accumulated.values())
+                total_packets = sum(v[0] for v in accumulated.values())
+                if accum_interval > 0:
+                    self._alerter.check(
+                        total_bytes=total_bytes,
+                        total_packets=total_packets,
+                        interval_sec=accum_interval,
+                        top_sources=[],
+                        top_dests=[],
+                        top_flows=[],
+                    )
+
+            # Full report with Top-N every REPORT_INTERVAL
+            now = time.monotonic()
+            if now - last_report >= REPORT_INTERVAL:
+                if accumulated:
+                    self._report(dict(accumulated), accum_interval)
+                accumulated = defaultdict(lambda: [0, 0])
+                accum_interval = 0.0
+                last_report = now
 
     def _drain_queues(self) -> dict[FlowKey, list[int]]:
         merged: dict[FlowKey, list[int]] = defaultdict(lambda: [0, 0])
@@ -398,7 +432,7 @@ class Coordinator:
                     entry[1] += counters[1]
         return dict(merged)
 
-    def _report(self, flows: dict[FlowKey, list[int]]) -> None:
+    def _report(self, flows: dict[FlowKey, list[int]], interval: float = REPORT_INTERVAL) -> None:
         if not flows:
             return
 
@@ -445,7 +479,7 @@ class Coordinator:
         self._alerter.check(
             total_bytes=total_bytes,
             total_packets=total_packets,
-            interval_sec=REPORT_INTERVAL,
+            interval_sec=interval,
             top_sources=top_sources,
             top_dests=top_dests,
             top_flows=top_flows,
