@@ -382,11 +382,9 @@ class Coordinator:
     def _run_loop(self) -> None:
         accumulated: dict[FlowKey, list[int]] = defaultdict(lambda: [0, 0])
         last_report = time.monotonic()
-        accum_interval = 0.0
 
         while not self._stop_event.is_set():
             time.sleep(COORDINATOR_POLL)
-            accum_interval += COORDINATOR_POLL
 
             # Drain worker queues into accumulator
             fresh = self._drain_queues()
@@ -397,25 +395,23 @@ class Coordinator:
                     entry[1] += counters[1]
 
                 # Quick alert check on every poll (low-latency detection)
-                total_bytes = sum(v[1] for v in accumulated.values())
-                total_packets = sum(v[0] for v in accumulated.values())
+                now = time.monotonic()
+                accum_interval = now - last_report
                 if accum_interval > 0:
-                    self._alerter.check(
+                    total_bytes = sum(v[1] for v in accumulated.values())
+                    total_packets = sum(v[0] for v in accumulated.values())
+                    self._alerter.check_fast(
                         total_bytes=total_bytes,
                         total_packets=total_packets,
                         interval_sec=accum_interval,
-                        top_sources=[],
-                        top_dests=[],
-                        top_flows=[],
                     )
 
             # Full report with Top-N every REPORT_INTERVAL
             now = time.monotonic()
             if now - last_report >= REPORT_INTERVAL:
                 if accumulated:
-                    self._report(dict(accumulated), accum_interval)
+                    self._report(dict(accumulated), now - last_report)
                 accumulated = defaultdict(lambda: [0, 0])
-                accum_interval = 0.0
                 last_report = now
 
     def _drain_queues(self) -> dict[FlowKey, list[int]]:
@@ -450,39 +446,48 @@ class Coordinator:
         sorted_flows = sorted(flows.items(), key=lambda x: x[1][1], reverse=True)
         top_flows = [{"key": k, "packets": v[0], "bytes": v[1]} for k, v in sorted_flows[:10]]
 
-        # Aggregate by src_ip, dst_ip
-        src_agg: dict[str, int] = defaultdict(int)
-        dst_agg: dict[str, int] = defaultdict(int)
+        # Aggregate by src_ip, dst_ip — [packets, bytes]
+        src_agg: dict[str, list[int]] = defaultdict(lambda: [0, 0])
+        dst_agg: dict[str, list[int]] = defaultdict(lambda: [0, 0])
         for (src_ip, dst_ip, _, _, _), counters in flows.items():
-            src_agg[src_ip] += counters[1]
-            dst_agg[dst_ip] += counters[1]
+            s = src_agg[src_ip]
+            s[0] += counters[0]; s[1] += counters[1]
+            d = dst_agg[dst_ip]
+            d[0] += counters[0]; d[1] += counters[1]
 
-        top_src = sorted(src_agg.items(), key=lambda x: x[1], reverse=True)[:10]
-        top_dst = sorted(dst_agg.items(), key=lambda x: x[1], reverse=True)[:10]
+        top_src = sorted(src_agg.items(), key=lambda x: x[1][1], reverse=True)[:10]
+        top_dst = sorted(dst_agg.items(), key=lambda x: x[1][1], reverse=True)[:10]
 
-        # Enrich IPs
+        # Enrich IPs (top-10 + any host-alert candidates)
         all_ips = list({ip for ip, _ in top_src} | {ip for ip, _ in top_dst})
         enriched = {e["ip"]: e for e in self._enricher.enrich_many(all_ips)}
 
-        top_sources = [{"ip": ip, "bytes": b, "info": enriched.get(ip, {})} for ip, b in top_src]
-        top_dests = [{"ip": ip, "bytes": b, "info": enriched.get(ip, {})} for ip, b in top_dst]
+        top_sources = [{"ip": ip, "bytes": v[1], "info": enriched.get(ip, {})} for ip, v in top_src]
+        top_dests = [{"ip": ip, "bytes": v[1], "info": enriched.get(ip, {})} for ip, v in top_dst]
 
         logger.info(
             "Report: %d flows, %d packets, %d bytes | top_src=%s top_dst=%s",
             len(flows),
             total_packets,
             total_bytes,
-            top_src[:3],
-            top_dst[:3],
+            [(ip, v[1]) for ip, v in top_src[:3]],
+            [(ip, v[1]) for ip, v in top_dst[:3]],
         )
 
-        self._alerter.check(
+        self._alerter.check_detail(
             total_bytes=total_bytes,
             total_packets=total_packets,
             interval_sec=interval,
             top_sources=top_sources,
             top_dests=top_dests,
             top_flows=top_flows,
+        )
+
+        self._alerter.check_host(
+            src_agg=dict(src_agg),
+            dst_agg=dict(dst_agg),
+            interval_sec=interval,
+            enriched=enriched,
         )
 
 

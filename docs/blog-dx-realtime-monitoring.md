@@ -52,7 +52,7 @@ On-Premise ─── DX/VPN ──→ VGW
         └── Alert (SNS / Slack)
 ```
 
-## 架构的四个关键设计决策
+## 架构的五个关键设计决策
 
 ### 决策一：在 Appliance 层镜像，而非直接抓 DX 包
 
@@ -116,7 +116,7 @@ while (running) {
 }
 ```
 
-Python 仅每 5 秒调用一次 `cap_flush()` 读取聚合结果，完全脱离了热路径。
+Python 仅每 1 秒调用一次 `cap_flush()` 读取聚合结果（见决策五），完全脱离了热路径。
 
 ### 决策三：SO_REUSEPORT 多进程无锁架构
 
@@ -176,6 +176,8 @@ NLB → UDP 4789
 - **REPORT_INTERVAL = 5s**：Top-N 完整报告仍每 5 秒生成一次（含 IP enrichment，开销较大）
 
 关键洞察：告警检查只需要 `total_bytes` 和 `total_packets`，计算量极小（两次求和 + 一次比较），完全可以在每个 0.5s poll 周期执行。而 Top-N 排序、IP enrichment 等重操作仍保持 5 秒周期，不影响系统负载。
+
+告警采用**双通知机制**：快速告警（`check_fast`）在 1.5 秒内发出速率异常通知，跟进告警（`check_detail`）在 5 秒完整报告时补充 Top Talker 详情。运维人员先收到"流量超阈值"的即时提醒，几秒后收到"谁在消耗带宽"的完整分析，兼顾了响应速度和信息完整性。
 
 ## 内核调优细节
 
