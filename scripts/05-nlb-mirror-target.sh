@@ -6,9 +6,9 @@ source "$SCRIPT_DIR/lib/common.sh"
 load_config
 load_env
 
-require_vars VPC_ID PROBE_SUBNETS PROBE_INSTANCE_ID_0 PROBE_INSTANCE_ID_1
+require_vars VPC_ID WORKLOAD_SUBNETS PROBE_INSTANCE_ID_0 PROBE_INSTANCE_ID_1
 
-parse_subnets PROBE_SUBNETS
+parse_subnets WORKLOAD_SUBNETS
 
 # Collect subnet IDs for NLB
 SUBNET_IDS=()

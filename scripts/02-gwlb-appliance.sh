@@ -6,7 +6,7 @@ source "$SCRIPT_DIR/lib/common.sh"
 load_config
 load_env
 
-require_vars VPC_ID VPC_CIDR APPLIANCE_SUBNETS GWLBE_SUBNETS \
+require_vars VPC_ID VPC_CIDR WORKLOAD_SUBNETS GWLBE_SUBNETS \
              APPLIANCE_SG_ID APPLIANCE_INSTANCE_TYPE KEY_PAIR_NAME AMI_ID
 
 # ================================================================
@@ -14,7 +14,7 @@ require_vars VPC_ID VPC_CIDR APPLIANCE_SUBNETS GWLBE_SUBNETS \
 # ================================================================
 log_info "=== Step 2a: Launching Appliance Instances ==="
 
-parse_subnets APPLIANCE_SUBNETS
+parse_subnets WORKLOAD_SUBNETS
 
 USERDATA=$(cat <<'UDEOF'
 #!/bin/bash

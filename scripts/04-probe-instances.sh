@@ -6,9 +6,9 @@ source "$SCRIPT_DIR/lib/common.sh"
 load_config
 load_env
 
-require_vars AMI_ID PROBE_SG_ID PROBE_SUBNETS PROBE_INSTANCE_TYPE KEY_PAIR_NAME
+require_vars AMI_ID PROBE_SG_ID WORKLOAD_SUBNETS PROBE_INSTANCE_TYPE KEY_PAIR_NAME
 
-parse_subnets PROBE_SUBNETS
+parse_subnets WORKLOAD_SUBNETS
 
 USERDATA=$(cat <<'UDEOF'
 #!/bin/bash
