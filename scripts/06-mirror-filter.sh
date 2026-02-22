@@ -38,7 +38,6 @@ for CIDR in "${CIDRS[@]}"; do
     --traffic-direction ingress \
     --rule-number "$RULE_NUM" \
     --rule-action accept \
-    --protocol 0 \
     --source-cidr-block "$CIDR" \
     --destination-cidr-block "0.0.0.0/0" || {
       log_warn "Ingress rule $RULE_NUM may already exist, continuing"
@@ -50,7 +49,6 @@ for CIDR in "${CIDRS[@]}"; do
     --traffic-direction egress \
     --rule-number "$RULE_NUM" \
     --rule-action accept \
-    --protocol 0 \
     --source-cidr-block "0.0.0.0/0" \
     --destination-cidr-block "$CIDR" || {
       log_warn "Egress rule $RULE_NUM may already exist, continuing"
@@ -67,7 +65,6 @@ aws ec2 create-traffic-mirror-filter-rule \
   --traffic-direction ingress \
   --rule-number 100 \
   --rule-action reject \
-  --protocol 0 \
   --source-cidr-block "0.0.0.0/0" \
   --destination-cidr-block "0.0.0.0/0" || {
     log_warn "Fallback ingress REJECT rule may already exist, continuing"
@@ -78,7 +75,6 @@ aws ec2 create-traffic-mirror-filter-rule \
   --traffic-direction egress \
   --rule-number 100 \
   --rule-action reject \
-  --protocol 0 \
   --source-cidr-block "0.0.0.0/0" \
   --destination-cidr-block "0.0.0.0/0" || {
     log_warn "Fallback egress REJECT rule may already exist, continuing"

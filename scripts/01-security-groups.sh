@@ -93,7 +93,13 @@ aws ec2 authorize-security-group-ingress \
 aws ec2 authorize-security-group-ingress \
     --group-id "$PROBE_SG_ID" \
     --protocol tcp --port 22 \
-    --cidr "$ADMIN_CIDR" 2>/dev/null || log_warn "Ingress TCP/22 rule already exists"
+    --cidr "$ADMIN_CIDR" 2>/dev/null || log_warn "Ingress TCP/22 admin rule already exists"
+
+# Ingress: SSH from VPC (NLB health check uses TCP/22)
+aws ec2 authorize-security-group-ingress \
+    --group-id "$PROBE_SG_ID" \
+    --protocol tcp --port 22 \
+    --cidr "$VPC_CIDR" 2>/dev/null || log_warn "Ingress TCP/22 VPC rule already exists"
 
 # Revoke default egress then add specific rules
 aws ec2 revoke-security-group-egress \
