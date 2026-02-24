@@ -6,6 +6,14 @@ source "$SCRIPT_DIR/lib/common.sh"
 
 load_config
 
+# Validate DEPLOY_MODE
+DEPLOY_MODE="${DEPLOY_MODE:-gwlb}"
+if [[ "$DEPLOY_MODE" != "gwlb" && "$DEPLOY_MODE" != "direct" ]]; then
+    log_error "Invalid DEPLOY_MODE='$DEPLOY_MODE'. Must be 'gwlb' or 'direct'"
+    exit 1
+fi
+log_info "Deploy mode: $DEPLOY_MODE"
+
 # Validate AWS credentials
 log_info "Validating AWS credentials..."
 CALLER_IDENTITY=$(aws sts get-caller-identity --region "$AWS_REGION" --output json)
@@ -59,6 +67,7 @@ save_var AMI_ID "$AMI_ID"
 # Print summary
 echo ""
 log_info "===== Configuration Summary ====="
+log_info "Deploy Mode:     $DEPLOY_MODE"
 log_info "AWS Region:      $AWS_REGION"
 log_info "AWS Account:     $ACCOUNT_ID"
 log_info "VPC:             $VPC_ID"

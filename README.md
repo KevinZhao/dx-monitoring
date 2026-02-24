@@ -24,22 +24,23 @@
 │              └────────┬────────┘                                           │
 │                       │                                                     │
 │  WORKLOAD   ┌─────────v─────────┐        ┌──────────────────────┐          │
-│  SUBNETS    │ Appliance 实例     │───────>│    业务子网           │          │
-│             │ (c6g.large, 每AZ) │ 转发   │ (10.0.1.0/24 等)    │          │
-│             └─────────┬─────────┘        └──────────────────────┘          │
+│  SUBNETS    │ Appliance 实例 ×N  │───────>│    业务子网           │          │
+│             │ (c8gn.4xlarge,    │ 转发   │ (10.0.1.0/24 等)    │          │
+│             │  每AZ 2台, GWLB分发)│        └──────────────────────┘          │
+│             └─────────┬─────────┘                                          │
 │                       │                                                     │
 │                       │ Traffic Mirror (VXLAN UDP 4789, VNI=12345)         │
 │                       │ packet-length=128                                  │
 │                       v                                                     │
 │              ┌─────────────────┐                                           │
 │              │  NLB (internal   │  ← Mirror Target                        │
-│              │  UDP 4789,       │                                           │
-│              │  cross-zone)     │                                           │
+│              │  UDP 4789)       │                                           │
 │              └────────┬────────┘                                           │
 │                       │                                                     │
 │             ┌─────────v─────────┐                                          │
-│             │ Probe 实例         │                                          │
-│             │ (c6gn.2xlarge)    │                                          │
+│             │ Probe 实例 ×N      │                                          │
+│             │ (c8gn.4xlarge,    │                                          │
+│             │  每AZ 2台, NLB分发) │                                          │
 │             │                   │                                          │
 │             │ ┌───────────────┐ │                                          │
 │             │ │  Worker 0..N  │ │  SO_REUSEPORT 多进程                    │
@@ -72,8 +73,8 @@
           ┌──────────┐   ┌──────────┐    ┌──────────┐
           │ Worker 0 │   │ Worker 1 │    │ Worker N │
           │          │   │          │    │          │
-          │ C Parser │   │ C Parser │    │ C Parser │  fast_parse.so (10x)
-          │ (fallback│   │ (fallback│    │ (fallback│  Python fallback
+          │ C recvmmsg   │ C recvmmsg    │ C recvmmsg  fast_recv.so
+          │ C Parser │   │ C Parser │    │ C Parser │  inline VXLAN parse
           │  Python) │   │  Python) │    │  Python) │
           │          │   │          │    │          │
           │ Flow     │   │ Flow     │    │ Flow     │  独立流表

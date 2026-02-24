@@ -6,6 +6,12 @@ source "$SCRIPT_DIR/lib/common.sh"
 load_config
 load_env
 
+DEPLOY_MODE="${DEPLOY_MODE:-gwlb}"
+if [[ "$DEPLOY_MODE" != "gwlb" ]]; then
+    log_info "DEPLOY_MODE=$DEPLOY_MODE — skipping appliance mirror sessions (use 11/12 scripts for business ENI mirroring)"
+    exit 0
+fi
+
 require_vars MIRROR_TARGET_ID MIRROR_FILTER_ID MIRROR_VNI PROJECT_TAG
 
 # --- Wait for Appliance instances to be ready ---

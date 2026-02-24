@@ -197,7 +197,6 @@ def _worker_c(
 
     ip_buf = ctypes.create_string_buffer(16)
     duration_ms = int(CAP_FLUSH_INTERVAL * 1000)
-    inv_rate = 1.0 / sample_rate if sample_rate < 1.0 else 1.0
     cumulative_queue_drops = 0
 
     try:
@@ -233,9 +232,6 @@ def _worker_c(
                 dst = ip_buf.value.decode()
                 pkts = int(r.packets)
                 byt = int(r.bytes)
-                if inv_rate != 1.0:
-                    pkts = int(pkts * inv_rate)
-                    byt = int(byt * inv_rate)
                 flows[(src, dst, r.proto, r.src_port, r.dst_port)] = [pkts, byt]
 
             try:

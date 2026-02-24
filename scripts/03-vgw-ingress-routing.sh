@@ -6,6 +6,12 @@ source "$SCRIPT_DIR/lib/common.sh"
 load_config
 load_env
 
+DEPLOY_MODE="${DEPLOY_MODE:-gwlb}"
+if [[ "$DEPLOY_MODE" != "gwlb" ]]; then
+    log_info "DEPLOY_MODE=$DEPLOY_MODE — skipping VGW Ingress routing (direct mode uses normal VPC routing)"
+    exit 0
+fi
+
 require_vars VPC_ID VGW_ID BUSINESS_SUBNET_CIDRS GWLBE_SUBNETS
 
 # ================================================================

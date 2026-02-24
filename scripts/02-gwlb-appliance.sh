@@ -6,6 +6,12 @@ source "$SCRIPT_DIR/lib/common.sh"
 load_config
 load_env
 
+DEPLOY_MODE="${DEPLOY_MODE:-gwlb}"
+if [[ "$DEPLOY_MODE" != "gwlb" ]]; then
+    log_info "DEPLOY_MODE=$DEPLOY_MODE — skipping GWLB + Appliance setup"
+    exit 0
+fi
+
 require_vars VPC_ID VPC_CIDR WORKLOAD_SUBNETS GWLBE_SUBNETS \
              APPLIANCE_SG_ID APPLIANCE_INSTANCE_TYPE KEY_PAIR_NAME AMI_ID
 

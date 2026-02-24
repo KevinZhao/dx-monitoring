@@ -26,16 +26,16 @@ GWLBE (每 AZ 一个, GWLBE_SUBNETS)
 GWLB (internal, Geneve UDP 6081)
   │ Target Group
   v
-Appliance 实例 (c6g.large, WORKLOAD_SUBNETS, 每 AZ ≥1)
+Appliance 实例 (c8gn.4xlarge, WORKLOAD_SUBNETS, 每 AZ ×APPLIANCE_COUNT)
   │ 透传转发 → 业务子网
   │
   │ ← Traffic Mirror Session (source: appliance ENI)
   │    VNI=12345, packet-length=128
   v
-NLB (internal, UDP 4789, cross-zone)      ← Mirror Target
+NLB (internal, UDP 4789)                  ← Mirror Target
   │ Target Group
   v
-Probe 实例 (c6gn.2xlarge, WORKLOAD_SUBNETS, 每 AZ ≥1)
+Probe 实例 (c8gn.4xlarge, WORKLOAD_SUBNETS, 每 AZ ×PROBE_COUNT)
   │ SO_REUSEPORT 多进程绑定 UDP/4789
   │ VXLAN 解封装 → 5s 聚合 → Top-N 报告
   v
@@ -231,7 +231,7 @@ Probe SG 放行 TCP/22 from VPC_CIDR 用于 NLB 健康检查。
 | RPS (Receive Packet Steering) 启用 | 多核分发网卡中断 |
 | GRO (Generic Receive Offload) 关闭 | 避免合并影响逐包解析 |
 
-实例 c6gn.2xlarge (ARM, 40Gbps NIC) 适配高吞吐场景。
+实例 c8gn.4xlarge (ARM, 50Gbps NIC) 适配高吞吐场景。
 
 ---
 
@@ -283,8 +283,10 @@ VPN 模拟环境 → 流量发生 → 验证 Probe 检测
 | `WORKLOAD_SUBNETS` | Appliance/Probe/GWLB/NLB 子网 |
 | `GWLBE_SUBNETS` | GWLB Endpoint 子网 |
 | `BUSINESS_SUBNET_CIDRS` | 业务子网 CIDR |
-| `APPLIANCE_INSTANCE_TYPE` | 默认 c6g.large |
-| `PROBE_INSTANCE_TYPE` | 默认 c6gn.2xlarge |
+| `APPLIANCE_INSTANCE_TYPE` | c8gn.4xlarge（40Gbps 需网络优化实例） |
+| `APPLIANCE_COUNT` | 3（每 AZ Appliance 台数） |
+| `PROBE_INSTANCE_TYPE` | c8gn.4xlarge |
+| `PROBE_COUNT` | 2（每 AZ Probe 台数） |
 | `MIRROR_VNI` | 默认 12345 |
 | `PROJECT_TAG` | 默认 dx-monitoring |
 
@@ -310,14 +312,41 @@ VPN 模拟环境 → 流量发生 → 验证 Probe 检测
 
 ## 十二、容量规划
 
-| 维度 | 建议 |
-|------|------|
-| Probe | 每 AZ ≥ 1 台 c6gn.2xlarge (40Gbps) |
-| Appliance | 每 AZ ≥ 1 台 c6g.large |
-| packet-length | 128B（降低 ~90% 镜像带宽） |
-| Filter | 仅 on-prem ↔ VPC |
-| 采样率 | 高流量环境 0.1-0.5 |
-| Worker 数 | 默认 = CPU 核数 |
+### 40Gbps DX 全量承载配置
+
+| 组件 | 规格 | 数量 (每 AZ) | 带宽承载 |
+|------|------|-------------|---------|
+| Appliance | c8gn.4xlarge (50Gbps 持续) | APPLIANCE_COUNT=2 | 每台 ~44Gbps (含 2.18x@20Gbps), 余量 +14% |
+| Probe | c8gn.4xlarge (50Gbps, 16 vCPU) | PROBE_COUNT=2 | 每台 ~2.68Mpps, 双台 5.36Mpps > 5Mpps@40Gbps |
+| packet-length | 128B | — | 降低 ~87% 镜像带宽 |
+| Filter | 仅 on-prem ↔ VPC | — | 最小化镜像量 |
+| C 流表 | 500K flows, 1M hash slots | — | 48% 负载因子 |
+| Worker 数 | 默认 = CPU 核数 | — | 16 workers/实例 |
+| 采样率 | 1.0 (全量) | — | 高流量降级可调 0.1-0.5 |
+
+### Appliance 网络带宽计算
+
+```
+单 Appliance 承载 X Gbps DX 流量:
+  入向 (GWLB Geneve 封装):  ~1.05X Gbps
+  出向 (转发到业务子网):    ~X Gbps
+  镜像 (VXLAN 128B 截断):   ~0.13X Gbps
+  总计:                     ~2.18X Gbps
+
+40Gbps / 2 台 Appliance = 每台 ~20Gbps → 总需 ~43.6Gbps
+c8gn.4xlarge 持续带宽 50Gbps → 余量 ~14%
+```
+
+### 丢包监控
+
+系统在三个层面检测丢包：
+- **内核 socket**: 读取 `/proc/net/udp` drops 列，Coordinator 每 5s 检查
+- **C 流表溢出**: `cap_get_dropped_flows()` 计数器，Worker 每秒报告
+- **Worker Queue**: 超时 0.1s 后 drop 并记录计数
+
+### 告警异步化
+
+SNS/Slack 发送已移至后台线程，避免在高流量告警触发时阻塞 Coordinator 收包。
 
 ---
 

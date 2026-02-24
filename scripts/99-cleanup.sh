@@ -6,6 +6,8 @@ source "$SCRIPT_DIR/lib/common.sh"
 load_config
 load_env
 
+DEPLOY_MODE="${DEPLOY_MODE:-gwlb}"
+
 # Reverse-order cleanup of all dx-monitoring resources
 
 FORCE=false
@@ -88,8 +90,26 @@ if [[ ${#PROBE_IDS[@]} -gt 0 ]]; then
         aws ec2 terminate-instances --instance-ids "${PROBE_IDS[@]}"
 fi
 
-# 6. VGW Ingress route table
-if [[ -n "${VGW_INGRESS_RTB_ID:-}" ]]; then
+# 5b. Lambda + EventBridge (direct mode)
+if [[ "$DEPLOY_MODE" == "direct" ]]; then
+    LAMBDA_NAME="dx-mirror-lifecycle"
+    RULE_NAME="dx-mirror-ec2-lifecycle"
+    LAMBDA_ROLE="dx-mirror-lifecycle-role"
+
+    cleanup_step "EventBridge targets for $RULE_NAME" \
+        aws events remove-targets --rule "$RULE_NAME" --ids "mirror-lifecycle" --region "$AWS_REGION"
+    cleanup_step "EventBridge rule $RULE_NAME" \
+        aws events delete-rule --name "$RULE_NAME" --region "$AWS_REGION"
+    cleanup_step "Lambda function $LAMBDA_NAME" \
+        aws lambda delete-function --function-name "$LAMBDA_NAME" --region "$AWS_REGION"
+    cleanup_step "Remove role from instance profile (Lambda)" \
+        aws iam delete-role-policy --role-name "$LAMBDA_ROLE" --policy-name "dx-mirror-lifecycle-policy"
+    cleanup_step "Delete Lambda IAM role" \
+        aws iam delete-role --role-name "$LAMBDA_ROLE"
+fi
+
+# 6. VGW Ingress route table (gwlb mode only)
+if [[ "$DEPLOY_MODE" == "gwlb" && -n "${VGW_INGRESS_RTB_ID:-}" ]]; then
     # Disassociate
     if [[ -n "${VGW_INGRESS_ASSOC_ID:-}" ]]; then
         cleanup_step "VGW ingress route table disassociation $VGW_INGRESS_ASSOC_ID" \
@@ -109,7 +129,11 @@ if [[ -n "${VGW_INGRESS_RTB_ID:-}" ]]; then
         aws ec2 delete-route-table --route-table-id "$VGW_INGRESS_RTB_ID"
 fi
 
-# 7. GWLBEs
+# 7. GWLBEs (gwlb mode only)
+if [[ "$DEPLOY_MODE" != "gwlb" ]]; then
+    log_info "Skipping GWLBE/GWLB/Appliance cleanup (DEPLOY_MODE=$DEPLOY_MODE)"
+fi
+if [[ "$DEPLOY_MODE" == "gwlb" ]]; then
 while IFS='=' read -r key value; do
     if [[ "$key" =~ ^GWLBE_ID_ ]]; then
         cleanup_step "GWLBE $value" \
@@ -157,6 +181,7 @@ if [[ ${#APPLIANCE_IDS[@]} -gt 0 ]]; then
     cleanup_step "Appliance instances (${APPLIANCE_IDS[*]})" \
         aws ec2 terminate-instances --instance-ids "${APPLIANCE_IDS[@]}"
 fi
+fi  # end DEPLOY_MODE == "gwlb" block
 
 # 11. Wait for all instances to terminate
 ALL_IDS=("${PROBE_IDS[@]}" "${APPLIANCE_IDS[@]}")
@@ -167,7 +192,10 @@ if [[ ${#ALL_IDS[@]} -gt 0 ]]; then
 fi
 
 # 12. Security Groups
-for SG_VAR in APPLIANCE_SG_ID PROBE_SG_ID; do
+SG_CLEANUP_LIST=("PROBE_SG_ID")
+[[ "$DEPLOY_MODE" == "gwlb" ]] && SG_CLEANUP_LIST=("APPLIANCE_SG_ID" "PROBE_SG_ID")
+
+for SG_VAR in "${SG_CLEANUP_LIST[@]}"; do
     SG_ID="${!SG_VAR:-}"
     if [[ -n "$SG_ID" ]]; then
         cleanup_step "Security group $SG_VAR ($SG_ID)" \

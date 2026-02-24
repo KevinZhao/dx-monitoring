@@ -27,16 +27,16 @@ On-Premise ─── DX/VPN ──→ VGW
                             │
                      Gateway Load Balancer
                             │
-                     Appliance Instance (gwlbtun)
+                     Appliance Instance ×2 (gwlbtun, c8gn.4xlarge)
                             │
                      Traffic Mirror (128B truncation)
                             │
-                     NLB (UDP 4789, cross-zone)
+                     NLB (UDP 4789)
                             │
                ┌────────────┼────────────┐
                │                         │
-        Probe Instance (AZ-a)    Probe Instance (AZ-b)
-        c8gn.4xlarge             c8gn.4xlarge
+        Probe Instance 0          Probe Instance 1
+        c8gn.4xlarge              c8gn.4xlarge
                │                         │
         SO_REUSEPORT kernel distribution
         ┌──┬──┬──┬──┬──┬──┬──┬──┐
@@ -267,11 +267,13 @@ journalctl -u dx-probe | grep "Report:"
 
 | 组件 | 规格 | 月成本 (eu-central-1, On-Demand) |
 |------|------|----------------------------------|
-| Probe 实例 × 2 | c8gn.4xlarge | ~$780 × 2 = $1,560 |
-| NLB | UDP, cross-zone | ~$25 + 流量费 |
-| Appliance × 2 | c6g.large | ~$100 × 2 = $200 |
-| GWLB | -- | ~$25 + 流量费 |
-| **合计** | | **~$1,850/月** |
+| Appliance × 2 | c8gn.4xlarge (50Gbps 持续) | $1.08/hr × 2 = $1,577 |
+| Probe × 2 | c8gn.4xlarge (16 workers) | $1.08/hr × 2 = $1,577 |
+| GWLB | 固定 + GLCU 处理费 | $11 + GLCU (按流量) |
+| NLB | 固定 + NLCU 处理费 | $20 + NLCU (按流量) |
+| GWLB Endpoint | 每 AZ 1 个 | ~$8 |
+| **EC2 固定成本** | | **~$3,154/月** |
+| **含 GWLB 流量 (20% 平均利用率)** | | **详见下方计算** |
 
 使用 Reserved Instance 或 Savings Plans 可降低约 40%。相比第三方网络监控 SaaS 的定价（通常 $5,000+/月），此方案具有明显的成本优势，且数据完全在客户 VPC 内处理。
 
@@ -284,7 +286,7 @@ journalctl -u dx-probe | grep "Report:"
 3. **异常流量检测**：通过 flow 级别的分析识别 DDoS、数据泄露等模式
 4. **容量规划**：基于 flow 级别数据做精确的带宽预测
 
-对于流量低于 10Gbps 的场景，可以使用更小的实例（c6gn.xlarge）并省略 C recvmmsg 优化，Python 版本即可满足需求。
+对于流量低于 10Gbps 的场景，可以减少 Appliance 到 1 台（c7g.large 即可）、Probe 1 台（c6gn.xlarge），大幅降低成本。
 
 ## 可复现性
 
