@@ -12,100 +12,127 @@
 
 ## 二、总体架构
 
+系统支持两种部署模式，通过 `DEPLOY_MODE` 配置切换：
+
+### B1 模式：GWLB 集中镜像 (`DEPLOY_MODE="gwlb"`)
+
 ```
-On-Prem (172.16.0.0/12, 192.168.0.0/16)
-  │ VPN / Direct Connect
-  v
-VGW (vgw-xxx)
-  │ Ingress Route Table (edge association)
-  │   dest: 业务子网 CIDR → next-hop: GWLBE
-  v
-GWLBE (每 AZ 一个, GWLBE_SUBNETS)
-  │ VPC Endpoint Service
-  v
-GWLB (internal, Geneve UDP 6081)
-  │ Target Group
-  v
-Appliance 实例 (c8gn.4xlarge, WORKLOAD_SUBNETS, 每 AZ ×APPLIANCE_COUNT)
-  │ 透传转发 → 业务子网
-  │
-  │ ← Traffic Mirror Session (source: appliance ENI)
-  │    VNI=12345, packet-length=128
-  v
-NLB (internal, UDP 4789)                  ← Mirror Target
-  │ Target Group
-  v
-Probe 实例 (c8gn.4xlarge, WORKLOAD_SUBNETS, 每 AZ ×PROBE_COUNT)
-  │ SO_REUSEPORT 多进程绑定 UDP/4789
-  │ VXLAN 解封装 → 5s 聚合 → Top-N 报告
-  v
-告警输出: SNS (SMS/Email) + Slack Webhook
+On-Prem ─── DX/VPN ──→ VGW
+                          │ Ingress Route Table (edge association)
+                          v
+                   GWLBE → GWLB → Appliance (透传转发)
+                                        │
+                                  Mirror Session (ENI)
+                                  128B 截断, VNI=12345
+                                        │
+                                   NLB (UDP 4789) → Probe × N
 ```
 
-### 流量路径
+流量路径：VGW → GWLBE → GWLB → Appliance（Geneve）→ 业务子网。Appliance ENI 作为 Mirror 源。
 
-1. On-prem 流量经 VPN/DX 到达 VGW
-2. VGW Ingress Route Table 将业务子网流量导向 GWLBE
-3. GWLBE → GWLB → Appliance 实例（Geneve 封装）
-4. Appliance 透传到业务子网
-5. Appliance ENI 作为 Mirror Session 源，VXLAN 封装镜像到 NLB
-6. NLB 分发到 Probe 实例，Probe 解封装并聚合分析
+### B2 模式：业务 ENI 直接镜像 (`DEPLOY_MODE="direct"`, 推荐)
 
-### 方案选择：VGW Ingress Routing + GWLB（B1）
+```
+On-Prem ─── DX/VPN ──→ VGW ──→ 正常 VPC 路由（不经过 GWLB）
+                                        │
+                    ┌───────────────────┼───────────────────┐
+                    v                   v                   v
+              业务 EC2-0          业务 EC2-1    ...   业务 EC2-N
+              ENI-0 ──Mirror──→                           ──Mirror──→
+                    └───────────────────┬───────────────────┘
+                                        v
+                                   NLB (UDP 4789) → Probe × N
+```
 
-| 方案 | 优点 | 缺点 |
-|------|------|------|
-| B1: VGW → GWLBE → Appliance | ENI 数量少、易管理；镜像 session 数可控 | 改变流量路径 |
-| B2: 分散镜像业务 ENI | 不改路径 | session 数爆炸；ASG 扩缩容需自动跟进 |
+流量路径：VGW → 业务子网（正常路径）。每个业务 ENI 独立镜像到 NLB。Lambda + EventBridge 自动管理 Mirror Session 生命周期。
 
-B1 将入口流量集中到少量 Appliance ENI，与 TGW Attachment ENI 镜像思路一致，运维成本最低。
+### 128B 包截断流水线
+
+截断发生在 **ENI hypervisor 层**，在 VXLAN 封装之前，不消耗实例 CPU/内存：
+
+```
+① 原始包到达/离开业务 ENI (1000B)
+   [Ethernet 14B][IP hdr: total_length=980][TCP hdr][Payload]
+
+② Hypervisor 匹配 Mirror Filter → ACCEPT
+
+③ Hypervisor 截断到 128B (packet-length=128)
+   [Ethernet 14B][IP hdr: total_length=980 ← 保留原值][TCP ports][截断...]
+                                   ↑ Probe 从这里读真实包大小
+
+④ Hypervisor 加 VXLAN 封装发往 Mirror Target
+   [外层 IP 20B][外层 UDP 8B][VXLAN 8B][截断的原始包 128B] = 164B
+
+⑤ NLB 收到 164B → 转发到 Probe
+
+⑥ Probe 剥 VXLAN → 从 IP header 读 total_length=980 → 统计真实字节数
+```
+
+截断不影响统计准确性：`pps` 准确（1 原始包 = 1 镜像包），`bytes` 准确（从 IP total_length 读取原始值，不是截断后的长度）。
+
+### 方案对比与选择
+
+| | B1 (GWLB) | B2 (Direct, 推荐) |
+|---|----------|-------------------|
+| 流量路径 | 改变（VGW → GWLBE → Appliance） | **不改变**（正常 VPC 路由） |
+| 故障影响 | Appliance 故障 → **业务断流** | Probe 故障 → **只丢监控** |
+| Mirror Session 数 | 2-3 个（Appliance ENI） | N 个（业务 ENI 数量） |
+| Session 管理 | 手动/简单 | Lambda 自动化 |
+| 成本 (20% avg) | ~$15,800/月 (GWLB 按 GB 计费) | **~$4,900/月** (session 按时计费) |
+| 实例类型限制 | 无（Appliance 可控） | 业务实例需 Nitro (5 代+) |
+| 适用场景 | 少量业务实例、非 Nitro 混合 | **100+ Nitro 实例（主流场景）** |
 
 ---
 
 ## 三、部署脚本流水线
 
+脚本根据 `DEPLOY_MODE` 自动跳过不需要的步骤：
+
 ```
-00-init-config          验证 AWS 凭证、VPC、VGW；解析 AL2023 ARM64 AMI
-        │
-01-security-groups      创建 dx-appliance-sg + dx-probe-sg
-        │
-   ┌────┴────┐
-   │         │          (可并行)
-02-gwlb     04-probe
-appliance   instances
-   │         │
-03-vgw      05-nlb
-ingress     mirror-target
-routing      │
-   │    06-mirror-filter
-   │         │
-   └────┬────┘
-        │
-07-mirror-sessions      Appliance ENI → NLB Mirror Target
-        │
-08-probe-deploy         SCP + pip install + systemd 服务
-        │
-09-verify               5 阶段验证
-        │
-10-eni-lifecycle        Cron 自动同步 Mirror Session (可选)
+                          DEPLOY_MODE
+                         /           \
+                      gwlb          direct
+                        │              │
+00-init-config ─────────┼──────────────┤
+01-security-groups ─────┼──────────────┤  (direct: 跳过 appliance-sg)
+                        │              │
+02-gwlb-appliance ──────┤         [skip]
+03-vgw-ingress ─────────┤         [skip]
+                        │              │
+04-probe-instances ─────┼──────────────┤
+05-nlb-mirror-target ───┼──────────────┤
+06-mirror-filter ───────┼──────────────┤
+                        │              │
+07-mirror-sessions ─────┤         [skip]
+                        │              │
+08-probe-deploy ────────┼──────────────┤
+09-verify ──────────────┼──────────────┤  (按模式验证不同组件)
+                        │              │
+                   [skip]──────────────┤  11-business-mirror-sync
+                   [skip]──────────────┤  12-deploy-mirror-lambda
+                        │              │
+10-eni-lifecycle ───────┤         [skip]
+99-cleanup ─────────────┼──────────────┤  (按模式清理对应资源)
 ```
 
 ### 脚本清单
 
-| 脚本 | 功能 | 幂等机制 |
-|------|------|----------|
-| `00-init-config.sh` | 验证配置、解析 AMI、生成 `env-vars.sh` | Name tag 查重 |
-| `01-security-groups.sh` | Appliance SG (UDP 6081) + Probe SG (UDP 4789) | 按 Name 复用 |
-| `02-gwlb-appliance.sh` | Appliance 实例 + GWLB + Endpoint Service + GWLBE | check_var_exists |
-| `03-vgw-ingress-routing.sh` | VGW Ingress Route Table + Edge Association + 路由 | check_var_exists |
-| `04-probe-instances.sh` | Probe 实例 + IAM Role/Profile + 内核调优 | check_var_exists |
-| `05-nlb-mirror-target.sh` | NLB (UDP/4789) + Target Group + Mirror Target | check_var_exists |
-| `06-mirror-filter.sh` | ACCEPT on-prem ↔ VPC, REJECT fallback | check_var_exists |
-| `07-mirror-sessions.sh` | 为每个 Appliance ENI 创建 Mirror Session | ENI 枚举去重 |
-| `08-probe-deploy.sh` | SSH 部署 probe 代码、依赖、systemd 服务 | systemctl restart |
-| `09-verify.sh` | 基础设施 → 路由 → Mirror → Probe → VXLAN 流量 | 只读检查 |
-| `10-eni-lifecycle.sh` | Cron (2min): 新 ENI 建 session，下线 ENI 删 session | 增量同步 |
-| `99-cleanup.sh` | 反序删除全部资源 | 需 `--force` 确认 |
+| 脚本 | 功能 | B1 | B2 | 幂等机制 |
+|------|------|:--:|:--:|----------|
+| `00-init-config.sh` | 验证配置、解析 AMI、生成 `env-vars.sh` | ✅ | ✅ | Name tag 查重 |
+| `01-security-groups.sh` | Appliance SG + Probe SG | ✅ | ✅(仅 probe-sg) | `ensure_sg_ingress/egress` |
+| `02-gwlb-appliance.sh` | Appliance + GWLB + Endpoint Service + GWLBE | ✅ | ⏭️ | check_var_exists |
+| `03-vgw-ingress-routing.sh` | VGW Ingress Route Table + Edge Association | ✅ | ⏭️ | check_var_exists |
+| `04-probe-instances.sh` | Probe 实例 + IAM Role/Profile + 内核调优 | ✅ | ✅ | check_var_exists |
+| `05-nlb-mirror-target.sh` | NLB (UDP/4789) + Target Group + Mirror Target | ✅ | ✅ | check_var_exists |
+| `06-mirror-filter.sh` | ACCEPT on-prem ↔ VPC, REJECT fallback | ✅ | ✅ | check_var_exists |
+| `07-mirror-sessions.sh` | Appliance ENI Mirror Session | ✅ | ⏭️ | ENI 枚举去重 |
+| `08-probe-deploy.sh` | 部署 probe 代码 + systemd 服务 | ✅ | ✅ | systemctl restart |
+| `09-verify.sh` | 5 阶段验证（按模式检查不同组件） | ✅ | ✅ | 只读检查 |
+| `10-eni-lifecycle.sh` | Cron 同步 Appliance Mirror Session | ✅ | ⏭️ | 增量同步 |
+| `11-business-mirror-sync.sh` | Cron 同步业务 ENI Mirror Session | ⏭️ | ✅ | 全量 diff |
+| `12-deploy-mirror-lambda.sh` | EventBridge + Lambda 实时同步 | ⏭️ | ✅ | create-or-update |
+| `99-cleanup.sh` | 反序删除全部资源（含 Lambda/EventBridge） | ✅ | ✅ | `--force` 确认 |
 
 ### 共享函数库 (`scripts/lib/common.sh`)
 
@@ -235,7 +262,9 @@ Probe SG 放行 TCP/22 from VPC_CIDR 用于 NLB 健康检查。
 
 ---
 
-## 八、ENI 生命周期管理 (`10-eni-lifecycle.sh`)
+## 八、Mirror Session 生命周期管理
+
+### B1 模式：`10-eni-lifecycle.sh`（Cron）
 
 Cron Job 每 2 分钟执行：
 1. 枚举当前 Appliance ENI (by PROJECT_TAG)
@@ -243,6 +272,24 @@ Cron Job 每 2 分钟执行：
 3. Diff: 新增 ENI → 建 session；下线 ENI → 删 session
 
 解决 Appliance 扩缩容时 Mirror Session 不同步的问题。
+
+### B2 模式：双重同步机制
+
+**实时层 — EventBridge + Lambda** (`lambda/mirror_lifecycle.py`):
+```
+EC2 state=running  → Lambda 检查是否在 BUSINESS_SUBNET → 创建 Mirror Session
+EC2 state=terminated → Lambda 按 SourceInstance tag 查找 → 删除 Mirror Session
+```
+秒级响应，每次只处理 1 台实例变更。
+
+**兜底层 — Cron** (`11-business-mirror-sync.sh`):
+```
+每 2 分钟全量 diff:
+  期望状态 = BUSINESS_SUBNET_CIDRS 中所有 running 实例的主 ENI
+  实际状态 = Mirror Target 关联的所有 session
+  创建缺失、删除过期
+```
+处理 Lambda 遗漏（如 EventBridge 故障）、首次全量部署。两套机制幂等，可同时运行互不冲突。
 
 ---
 
@@ -276,6 +323,7 @@ VPN 模拟环境 → 流量发生 → 验证 Probe 检测
 
 | 参数 | 说明 |
 |------|------|
+| `DEPLOY_MODE` | `"gwlb"` (B1) 或 `"direct"` (B2, 推荐) |
 | `AWS_REGION` | 部署区域 |
 | `VPC_ID` / `VPC_CIDR` | 目标 VPC |
 | `VGW_ID` | VPN Gateway |
@@ -312,30 +360,54 @@ VPN 模拟环境 → 流量发生 → 验证 Probe 检测
 
 ## 十二、容量规划
 
-### 40Gbps DX 全量承载配置
+### B2 (direct) 40Gbps 配置（推荐）
 
-| 组件 | 规格 | 数量 (每 AZ) | 带宽承载 |
-|------|------|-------------|---------|
-| Appliance | c8gn.4xlarge (50Gbps 持续) | APPLIANCE_COUNT=2 | 每台 ~44Gbps (含 2.18x@20Gbps), 余量 +14% |
-| Probe | c8gn.4xlarge (50Gbps, 16 vCPU) | PROBE_COUNT=2 | 每台 ~2.68Mpps, 双台 5.36Mpps > 5Mpps@40Gbps |
-| packet-length | 128B | — | 降低 ~87% 镜像带宽 |
-| Filter | 仅 on-prem ↔ VPC | — | 最小化镜像量 |
+| 组件 | 规格 | 数量 | 说明 |
+|------|------|------|------|
+| Probe | c8gn.4xlarge (50Gbps, 16 vCPU) | 每 AZ 2 台 | 每台 ~2.68Mpps, 双台 5.36Mpps > 5Mpps@40Gbps |
+| NLB | UDP/4789, 单 AZ | 1 | 自动分流到两台 Probe |
+| Mirror Session | 每业务 ENI 1 个 | N (按实例数) | packet-length=128, VNI=12345 |
+| Lambda | mirror_lifecycle.py | 1 | 实时创建/删除 Mirror Session |
 | C 流表 | 500K flows, 1M hash slots | — | 48% 负载因子 |
 | Worker 数 | 默认 = CPU 核数 | — | 16 workers/实例 |
-| 采样率 | 1.0 (全量) | — | 高流量降级可调 0.1-0.5 |
 
-### Appliance 网络带宽计算
+### B1 (gwlb) 40Gbps 配置
+
+| 组件 | 规格 | 数量 | 说明 |
+|------|------|------|------|
+| Appliance | c8gn.4xlarge (50Gbps 持续) | 每 AZ 2 台 | 每台 ~44Gbps (含 2.18x 双向+镜像因子) |
+| Probe | c8gn.4xlarge | 每 AZ 2 台 | 同上 |
+| GWLB + GWLBE | — | 各 1 | 集中拦截 DX 流量 |
+
+Appliance 网络带宽计算（B1）：
+```
+单 Appliance 承载 X Gbps:
+  入向 (Geneve): ~1.05X  +  出向 (转发): ~X  +  镜像: ~0.13X  =  ~2.18X
+40Gbps / 2 台 = 每台 ~20Gbps → 2.18 × 20 = ~43.6Gbps < 50Gbps
+```
+
+### 成本对比 (eu-central-1, 20% 平均利用率)
+
+| 组件 | B1 (gwlb) | B2 (direct, 100 实例) |
+|------|----------|----------------------|
+| Probe 2× c8gn.4xlarge | $1,576 | $1,576 |
+| Appliance 2× c8gn.4xlarge | $1,576 | — |
+| GWLB 固定 + GLCU | $11,048 | — |
+| NLB 固定 + NLCU | $2,069 | $2,038 |
+| Mirror Session | $26 (2 个) | $1,314 (100 个) |
+| Lambda + EventBridge | — | ~$1 |
+| **月总计** | **~$16,300** | **~$4,900** |
+
+### 镜像带宽计算
 
 ```
-单 Appliance 承载 X Gbps DX 流量:
-  入向 (GWLB Geneve 封装):  ~1.05X Gbps
-  出向 (转发到业务子网):    ~X Gbps
-  镜像 (VXLAN 128B 截断):   ~0.13X Gbps
-  总计:                     ~2.18X Gbps
-
-40Gbps / 2 台 Appliance = 每台 ~20Gbps → 总需 ~43.6Gbps
-c8gn.4xlarge 持续带宽 50Gbps → 余量 ~14%
+40Gbps DX (avg 1000B/pkt):
+  pps = 40Gbps / (1000B × 8) = 5M pps
+  镜像 (128B 截断): 5M × 128B × 8 = 5.12 Gbps  (原始的 ~13%)
+  VXLAN 封装后:     5M × 164B × 8 = 6.56 Gbps   (NLB 实际处理量)
 ```
+
+每个业务 ENI 的镜像开销：如果平均分到 100 台，每台 400Mbps DX 流量 → 镜像仅 ~52Mbps（13%），对业务几乎无感。
 
 ### 丢包监控
 
@@ -570,3 +642,4 @@ load_env  # 立即加载到当前 shell
 | TG 打标签失败 | `ec2 create-tags` 不支持 ELBv2 ARN | 创建时用 `--tags` |
 | Probe API 失败 | 缺少 IAM Role | 创建 Instance Profile |
 | SSM 不可用 | 私有子网无出网 | 添加 NAT Gateway |
+| SG 规则丢失 | `create_sg_if_not_exists` 的 `log_info` 输出到 stdout，被 `$()` 捕获污染 SG ID，导致 authorize 调用 ID 错误后被 `\|\| log_warn` 静默吞掉 | log 输出加 `>&2`；新增 `ensure_sg_ingress/egress` helper 区分 Duplicate 和真实错误 |
