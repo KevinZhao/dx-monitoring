@@ -277,6 +277,23 @@ journalctl -u dx-probe | grep "Report:"
 
 使用 Reserved Instance 或 Savings Plans 可降低约 40%。相比第三方网络监控 SaaS 的定价（通常 $5,000+/月），此方案具有明显的成本优势，且数据完全在客户 VPC 内处理。
 
+## 架构演进：B2 直接镜像模式
+
+上述 B1 (GWLB) 架构在验证了 C recvmmsg 性能后，我们发现了进一步简化的机会。对于 100+ Nitro 实例的主流场景，可以跳过 GWLB/Appliance 层，直接在**业务 ENI** 上创建 Traffic Mirror Session：
+
+```
+B1:  业务 ENI → Appliance ENI → Mirror → NLB → Probe
+B2:  业务 ENI → Mirror → Probe ENI (直接)
+```
+
+**关键改进**：
+- **去掉 GWLB**：不再改变流量路径，Probe 故障只丢监控不断流量
+- **去掉 NLB**：单 Probe 模式下 Mirror Target 直接指向 Probe ENI，无需负载均衡中转
+- **纯固定成本**：$2,891/月（vs B1 的 $16,300/月），与流量无关
+- **Lambda + EventBridge** 自动管理业务 ENI 的 Mirror Session 生命周期
+
+单台 c8gn.8xlarge (32 vCPU, 100Gbps) 作为 Probe，32 个 worker ~5.36Mpps，覆盖 40Gbps DX 流量绰绰有余。告警天然准确——一台看到 100% 的 DX 流量，无需跨实例聚合。
+
 ## 架构适用场景
 
 本方案适用于以下场景：

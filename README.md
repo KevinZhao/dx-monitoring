@@ -4,62 +4,54 @@
 
 ## 系统架构图
 
+系统支持两种部署模式，通过 `DEPLOY_MODE` 配置切换：
+
+### B2 模式：业务 ENI 直接镜像 (`DEPLOY_MODE="direct"`, 推荐)
+
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              AWS VPC (10.0.0.0/16)                         │
-│                                                                             │
-│  On-Prem ──VPN/DX──> VGW                                                   │
-│  (172.16/12)          │                                                     │
-│  (192.168/16)         │ Ingress Route Table                                │
-│                       │ (业务CIDR → GWLBE)                                 │
-│                       v                                                     │
-│              ┌─────────────────┐                                           │
-│              │   GWLBE (每AZ)  │  GWLBE_SUBNETS                           │
-│              └────────┬────────┘                                           │
-│                       │ Endpoint Service                                   │
-│                       v                                                     │
-│              ┌─────────────────┐                                           │
-│              │  GWLB (Geneve   │                                           │
-│              │  UDP 6081)      │                                           │
-│              └────────┬────────┘                                           │
-│                       │                                                     │
-│  WORKLOAD   ┌─────────v─────────┐        ┌──────────────────────┐          │
-│  SUBNETS    │ Appliance 实例 ×N  │───────>│    业务子网           │          │
-│             │ (c8gn.4xlarge,    │ 转发   │ (10.0.1.0/24 等)    │          │
-│             │  每AZ 2台, GWLB分发)│        └──────────────────────┘          │
-│             └─────────┬─────────┘                                          │
-│                       │                                                     │
-│                       │ Traffic Mirror (VXLAN UDP 4789, VNI=12345)         │
-│                       │ packet-length=128                                  │
-│                       v                                                     │
-│              ┌─────────────────┐                                           │
-│              │  NLB (internal   │  ← Mirror Target                        │
-│              │  UDP 4789)       │                                           │
-│              └────────┬────────┘                                           │
-│                       │                                                     │
-│             ┌─────────v─────────┐                                          │
-│             │ Probe 实例 ×N      │                                          │
-│             │ (c8gn.4xlarge,    │                                          │
-│             │  每AZ 2台, NLB分发) │                                          │
-│             │                   │                                          │
-│             │ ┌───────────────┐ │                                          │
-│             │ │  Worker 0..N  │ │  SO_REUSEPORT 多进程                    │
-│             │ │  UDP/4789     │ │  内核按 4-tuple hash 分发               │
-│             │ └───────┬───────┘ │                                          │
-│             │         │ Queue   │                                          │
-│             │ ┌───────v───────┐ │                                          │
-│             │ │  Coordinator  │ │  5s 聚合 → Top-N → Enricher 富化       │
-│             │ └───────┬───────┘ │                                          │
-│             └─────────┼─────────┘                                          │
-│                       │                                                     │
-│                       v                                                     │
-│              ┌─────────────────┐                                           │
-│              │   Alerter       │                                           │
-│              │ SNS + Slack     │                                           │
-│              │ 阈值: 1Gbps /   │                                           │
-│              │ 500Kpps         │                                           │
-│              └─────────────────┘                                           │
-└─────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                       AWS VPC (10.0.0.0/16)                      │
+│                                                                  │
+│  On-Prem ──VPN/DX──> VGW ──> 正常 VPC 路由                       │
+│  (172.16/12)                     │                               │
+│  (192.168/16)    ┌───────────────┼───────────────┐               │
+│                  v               v               v               │
+│            业务 EC2-0      业务 EC2-1  ...  业务 EC2-N            │
+│            ENI ──Mirror──→     ──Mirror──→  ──Mirror──→          │
+│                  └───────────────┬───────────────┘               │
+│                                  v                               │
+│  WORKLOAD        ┌───────────────────────┐                       │
+│  SUBNETS         │ Probe (c8gn.8xlarge)  │  ← Mirror Target     │
+│                  │ 32 workers, 5.8M pps  │    (直接指向 Probe ENI)│
+│                  └───────────┬───────────┘                       │
+│                              │                                   │
+│                              v                                   │
+│                  ┌───────────────────────┐                       │
+│                  │   Alerter (SNS+Slack) │                       │
+│                  │   1.5s 告警 / 5s 报告  │                       │
+│                  └───────────────────────┘                       │
+│                                                                  │
+│  Lambda + EventBridge 自动管理 Mirror Session 生命周期            │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### B1 模式：GWLB 集中镜像 (`DEPLOY_MODE="gwlb"`)
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                       AWS VPC (10.0.0.0/16)                      │
+│                                                                  │
+│  On-Prem ──VPN/DX──> VGW                                        │
+│  (172.16/12)          │ Ingress Route Table                      │
+│  (192.168/16)         v                                          │
+│              GWLBE (每AZ) → GWLB → Appliance ×N (透传转发)       │
+│                                        │                         │
+│                                  Mirror Session (ENI)            │
+│                                        │                         │
+│                                   NLB (UDP 4789) → Probe ×N     │
+│                                        │                         │
+│                                   Alerter (SNS+Slack)            │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
 ## Probe 内部架构
@@ -105,25 +97,27 @@
 ## 快速开始
 
 ```bash
-# 1. 编辑配置
+# 1. 编辑配置（默认 DEPLOY_MODE="direct"）
 vi config/dx-monitor.conf
 
-# 2. 顺序执行
+# 2. B2 (direct) 模式部署
 bash scripts/00-init-config.sh
 bash scripts/01-security-groups.sh
-bash scripts/02-gwlb-appliance.sh   # 可与 04 并行
-bash scripts/03-vgw-ingress-routing.sh
-bash scripts/04-probe-instances.sh   # 可与 02 并行
-bash scripts/05-nlb-mirror-target.sh
+bash scripts/04-probe-instances.sh
+bash scripts/05-nlb-mirror-target.sh   # direct: Probe ENI target; gwlb: NLB target
 bash scripts/06-mirror-filter.sh
-bash scripts/07-mirror-sessions.sh
 bash scripts/08-probe-deploy.sh
+bash scripts/11-business-mirror-sync.sh  # 同步业务 ENI mirror session
+bash scripts/12-deploy-mirror-lambda.sh  # EventBridge + Lambda 实时同步
 bash scripts/09-verify.sh
 
-# 3. (可选) ENI 生命周期自动同步
+# 2b. B1 (gwlb) 模式额外步骤
+bash scripts/02-gwlb-appliance.sh
+bash scripts/03-vgw-ingress-routing.sh
+bash scripts/07-mirror-sessions.sh
 bash scripts/10-eni-lifecycle.sh
 
-# 4. 清理
+# 3. 清理
 bash scripts/99-cleanup.sh
 ```
 
@@ -152,18 +146,18 @@ tests/run-all.sh               # 测试编排
 
 | 子网 | 用途 |
 |------|------|
-| WORKLOAD_SUBNETS | Appliance + Probe + GWLB + NLB 共用 |
-| GWLBE_SUBNETS | Gateway LB Endpoint (VGW 入口) |
+| WORKLOAD_SUBNETS | Probe 子网（gwlb 模式含 Appliance + GWLB + NLB） |
+| GWLBE_SUBNETS | Gateway LB Endpoint（仅 gwlb 模式） |
 | Business Subnets | 业务主机 |
 
 ## 安全组
 
-| SG | 入站 |
-|----|------|
-| dx-appliance-sg | UDP 6081 (Geneve) from VPC; SSH from ADMIN |
-| dx-probe-sg | UDP 4789 (VXLAN) from VPC; TCP 22 from VPC+ADMIN |
+| SG | 入站 | 适用模式 |
+|----|------|----------|
+| dx-appliance-sg | UDP 6081 (Geneve) from VPC; SSH from ADMIN | 仅 gwlb |
+| dx-probe-sg | UDP 4789 (VXLAN) from VPC; TCP 22 from VPC+ADMIN | 全部 |
 
-Probe SG 必须允许 TCP/22 from VPC_CIDR（NLB 健康检查）。
+Probe SG 放行 TCP/22 from VPC_CIDR（gwlb 模式用于 NLB 健康检查）。
 
 ## 测试
 
