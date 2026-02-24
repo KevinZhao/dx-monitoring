@@ -41,10 +41,10 @@ On-Prem ─── DX/VPN ──→ VGW ──→ 正常 VPC 路由（不经过 G
               ENI-0 ──Mirror──→                           ──Mirror──→
                     └───────────────────┬───────────────────┘
                                         v
-                                   NLB (UDP 4789) → Probe × N
+                                   Probe ENI (直接, 无 NLB)
 ```
 
-流量路径：VGW → 业务子网（正常路径）。每个业务 ENI 独立镜像到 NLB。Lambda + EventBridge 自动管理 Mirror Session 生命周期。
+流量路径：VGW → 业务子网（正常路径）。每个业务 ENI 直接镜像到 Probe ENI。Lambda + EventBridge 自动管理 Mirror Session 生命周期。单 Probe 模式无需 NLB 负载均衡，方案为**纯固定成本**。
 
 ### 128B 包截断流水线
 
@@ -63,7 +63,7 @@ On-Prem ─── DX/VPN ──→ VGW ──→ 正常 VPC 路由（不经过 G
 ④ Hypervisor 加 VXLAN 封装发往 Mirror Target
    [外层 IP 20B][外层 UDP 8B][VXLAN 8B][截断的原始包 128B] = 164B
 
-⑤ NLB 收到 164B → 转发到 Probe
+⑤ Probe ENI 收到 164B（直接接收，无 NLB 中转）
 
 ⑥ Probe 剥 VXLAN → 从 IP header 读 total_length=980 → 统计真实字节数
 ```
@@ -124,7 +124,7 @@ On-Prem ─── DX/VPN ──→ VGW ──→ 正常 VPC 路由（不经过 G
 | `02-gwlb-appliance.sh` | Appliance + GWLB + Endpoint Service + GWLBE | ✅ | ⏭️ | check_var_exists |
 | `03-vgw-ingress-routing.sh` | VGW Ingress Route Table + Edge Association | ✅ | ⏭️ | check_var_exists |
 | `04-probe-instances.sh` | Probe 实例 + IAM Role/Profile + 内核调优 | ✅ | ✅ | check_var_exists |
-| `05-nlb-mirror-target.sh` | NLB (UDP/4789) + Target Group + Mirror Target | ✅ | ✅ | check_var_exists |
+| `05-nlb-mirror-target.sh` | gwlb: NLB + Mirror Target; direct: Probe ENI Mirror Target | ✅ | ✅ | check_var_exists |
 | `06-mirror-filter.sh` | ACCEPT on-prem ↔ VPC, REJECT fallback | ✅ | ✅ | check_var_exists |
 | `07-mirror-sessions.sh` | Appliance ENI Mirror Session | ✅ | ⏭️ | ENI 枚举去重 |
 | `08-probe-deploy.sh` | 部署 probe 代码 + systemd 服务 | ✅ | ✅ | systemctl restart |
@@ -229,7 +229,7 @@ sampled = (hash(flow_key) % 10000) / 10000.0 < PROBE_SAMPLE_RATE
 | `dx-appliance-sg` | UDP 6081 (Geneve) from VPC; SSH from ADMIN | All to VPC |
 | `dx-probe-sg` | UDP 4789 (VXLAN) from VPC; TCP 22 from VPC+ADMIN | TCP 443 (AWS API); All to VPC |
 
-Probe SG 放行 TCP/22 from VPC_CIDR 用于 NLB 健康检查。
+Probe SG 放行 TCP/22 from VPC_CIDR 用于 NLB 健康检查（仅 gwlb 模式）。
 
 ---
 
@@ -365,14 +365,13 @@ VPN 模拟环境 → 流量发生 → 验证 Probe 检测
 | 组件 | 规格 | 数量 | 说明 |
 |------|------|------|------|
 | Probe | c8gn.8xlarge (100Gbps, 32 vCPU) | **1 台** | 32 workers ~5.36Mpps > 5Mpps@40Gbps，单台看到全部流量 |
-| NLB | UDP/4789, 单 AZ | 1 | Mirror Target（单 Probe 也需要 NLB 作为稳定 target） |
 | Mirror Session | 每业务 ENI 1 个 | N (按实例数) | packet-length=128, VNI=12345 |
 | Lambda | mirror_lifecycle.py | 1 | 实时创建/删除 Mirror Session |
 | C 流表 | 500K flows, 1M hash slots | — | 48% 负载因子 |
 | Worker 数 | 默认 = CPU 核数 | — | 32 workers/实例 |
 
 单 Probe 优势：**告警天然准确**，一台看到 100% 的 DX 流量，无需跨实例聚合。
-费用与 2×c8gn.4xlarge 完全相同（$1,576/月）。
+费用与 2×c8gn.4xlarge 完全相同（$1,576/月）。Mirror Target 直接指向 Probe ENI，无需 NLB，方案为纯固定成本。
 
 ### B1 (gwlb) 40Gbps 配置
 
@@ -396,10 +395,10 @@ Appliance 网络带宽计算（B1）：
 | Probe | $1,576 (2× c8gn.4xlarge) | $1,576 (1× c8gn.8xlarge) |
 | Appliance 2× c8gn.4xlarge | $1,576 | — |
 | GWLB 固定 + GLCU | $11,048 | — |
-| NLB 固定 + NLCU | $2,069 | $2,038 |
+| NLB 固定 + NLCU | $2,069 | — |
 | Mirror Session | $26 (2 个) | $1,314 (100 个) |
 | Lambda + EventBridge | — | ~$1 |
-| **月总计** | **~$16,300** | **~$4,900** |
+| **月总计** | **~$16,300** | **~$2,891** |
 
 ### 镜像带宽计算
 
@@ -407,7 +406,7 @@ Appliance 网络带宽计算（B1）：
 40Gbps DX (avg 1000B/pkt):
   pps = 40Gbps / (1000B × 8) = 5M pps
   镜像 (128B 截断): 5M × 128B × 8 = 5.12 Gbps  (原始的 ~13%)
-  VXLAN 封装后:     5M × 164B × 8 = 6.56 Gbps   (NLB 实际处理量)
+  VXLAN 封装后:     5M × 164B × 8 = 6.56 Gbps   (Probe ENI 实际处理量)
 ```
 
 每个业务 ENI 的镜像开销：如果平均分到 100 台，每台 400Mbps DX 流量 → 镜像仅 ~52Mbps（13%），对业务几乎无感。

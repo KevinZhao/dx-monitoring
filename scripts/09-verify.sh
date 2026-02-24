@@ -201,19 +201,21 @@ fi
 # ========== Stage 4: Probe Health ==========
 stage_header 4 "Probe Health"
 
-# NLB target health
-if [[ -n "${NLB_ARN:-}" && -n "${MIRROR_TG_ARN:-}" ]]; then
-    UNHEALTHY=$(aws elbv2 describe-target-health --target-group-arn "$MIRROR_TG_ARN" \
-        --query "TargetHealthDescriptions[?TargetHealth.State!='healthy']" --output text 2>/dev/null || echo "")
-    HEALTHY_COUNT=$(aws elbv2 describe-target-health --target-group-arn "$MIRROR_TG_ARN" \
-        --query "length(TargetHealthDescriptions[?TargetHealth.State=='healthy'])" --output text 2>/dev/null || echo "0")
-    if [[ -z "$UNHEALTHY" || "$UNHEALTHY" == "None" ]]; then
-        check_pass "NLB targets all healthy ($HEALTHY_COUNT target(s))"
+# NLB target health (gwlb mode only — direct mode has no NLB)
+if [[ "$DEPLOY_MODE" == "gwlb" ]]; then
+    if [[ -n "${NLB_ARN:-}" && -n "${MIRROR_TG_ARN:-}" ]]; then
+        UNHEALTHY=$(aws elbv2 describe-target-health --target-group-arn "$MIRROR_TG_ARN" \
+            --query "TargetHealthDescriptions[?TargetHealth.State!='healthy']" --output text 2>/dev/null || echo "")
+        HEALTHY_COUNT=$(aws elbv2 describe-target-health --target-group-arn "$MIRROR_TG_ARN" \
+            --query "length(TargetHealthDescriptions[?TargetHealth.State=='healthy'])" --output text 2>/dev/null || echo "0")
+        if [[ -z "$UNHEALTHY" || "$UNHEALTHY" == "None" ]]; then
+            check_pass "NLB targets all healthy ($HEALTHY_COUNT target(s))"
+        else
+            check_fail "NLB has unhealthy targets"
+        fi
     else
-        check_fail "NLB has unhealthy targets"
+        check_fail "NLB_ARN or MIRROR_TG_ARN not set"
     fi
-else
-    check_fail "NLB_ARN or MIRROR_TG_ARN not set"
 fi
 
 # SSH probe service check

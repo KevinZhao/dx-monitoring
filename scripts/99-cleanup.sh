@@ -52,29 +52,31 @@ if [[ -n "${MIRROR_TARGET_ID:-}" ]]; then
         aws ec2 delete-traffic-mirror-target --traffic-mirror-target-id "$MIRROR_TARGET_ID"
 fi
 
-# 4. NLB: listener, target group, load balancer
-if [[ -n "${NLB_ARN:-}" ]]; then
-    # Delete listeners
-    LISTENER_ARNS=$(aws elbv2 describe-listeners --load-balancer-arn "$NLB_ARN" \
-        --query 'Listeners[].ListenerArn' --output text 2>/dev/null || echo "")
-    for LARN in $LISTENER_ARNS; do
-        cleanup_step "NLB listener $LARN" \
-            aws elbv2 delete-listener --listener-arn "$LARN"
-    done
-
-    # Delete load balancer first (then TG after)
-    cleanup_step "NLB $NLB_ARN" \
-        aws elbv2 delete-load-balancer --load-balancer-arn "$NLB_ARN"
-fi
-
-if [[ -n "${MIRROR_TG_ARN:-}" ]]; then
-    # Wait briefly for NLB deletion to propagate
+# 4. NLB: listener, target group, load balancer (gwlb mode only — direct mode has no NLB)
+if [[ "$DEPLOY_MODE" == "gwlb" ]]; then
     if [[ -n "${NLB_ARN:-}" ]]; then
-        log_info "Waiting for NLB deletion to propagate..."
-        sleep 10
+        # Delete listeners
+        LISTENER_ARNS=$(aws elbv2 describe-listeners --load-balancer-arn "$NLB_ARN" \
+            --query 'Listeners[].ListenerArn' --output text 2>/dev/null || echo "")
+        for LARN in $LISTENER_ARNS; do
+            cleanup_step "NLB listener $LARN" \
+                aws elbv2 delete-listener --listener-arn "$LARN"
+        done
+
+        # Delete load balancer first (then TG after)
+        cleanup_step "NLB $NLB_ARN" \
+            aws elbv2 delete-load-balancer --load-balancer-arn "$NLB_ARN"
     fi
-    cleanup_step "NLB target group $MIRROR_TG_ARN" \
-        aws elbv2 delete-target-group --target-group-arn "$MIRROR_TG_ARN"
+
+    if [[ -n "${MIRROR_TG_ARN:-}" ]]; then
+        # Wait briefly for NLB deletion to propagate
+        if [[ -n "${NLB_ARN:-}" ]]; then
+            log_info "Waiting for NLB deletion to propagate..."
+            sleep 10
+        fi
+        cleanup_step "NLB target group $MIRROR_TG_ARN" \
+            aws elbv2 delete-target-group --target-group-arn "$MIRROR_TG_ARN"
+    fi
 fi
 
 # 5. Probe instances
