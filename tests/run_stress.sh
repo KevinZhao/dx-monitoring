@@ -1,7 +1,7 @@
 #!/bin/bash
 set -ex
 
-BUCKET="dx-monitoring-deploy-REDACTED-ACCOUNT-ID"
+BUCKET="dx-monitoring-deploy-${AWS_ACCOUNT_ID}"  # set AWS_ACCOUNT_ID in env
 NLB_DNS="$1"
 DURATION="${2:-30}"
 THREADS="${3:-8}"

@@ -17,7 +17,7 @@
 | 内存 | 32 GB |
 | 网络 | 50 Gbps |
 | 架构 | ARM64 (Graviton 4) |
-| AMI | AL2023 ARM64 (ami-REDACTED) |
+| AMI | AL2023 ARM64 (latest) |
 
 ### 1.2 Probe 软件配置
 
