@@ -360,7 +360,7 @@ VPN 模拟环境 → 流量发生 → 验证 Probe 检测
 
 ## 十二、容量规划
 
-### B2 (direct) 40Gbps 配置（推荐）
+### B2 全量模式 (direct, SAMPLE_RATE=1.0)
 
 | 组件 | 规格 | 数量 | 说明 |
 |------|------|------|------|
@@ -372,6 +372,27 @@ VPN 模拟环境 → 流量发生 → 验证 Probe 检测
 
 单 Probe 优势：**告警天然准确**，一台看到 100% 的 DX 流量，无需跨实例聚合。
 费用与 2×c8gn.4xlarge 完全相同（$1,576/月）。Mirror Target 直接指向 Probe ENI，无需 NLB，方案为纯固定成本。
+
+### B2 采样模式 (direct, SAMPLE_RATE=0.5, 推荐)
+
+| 组件 | 规格 | 数量 | 说明 |
+|------|------|------|------|
+| Probe | c8gn.4xlarge (50Gbps, 16 vCPU) | **1 台** | 16 workers ~2.68Mpps，采样后实际处理 ~2.5Mpps |
+| Mirror Session | 每业务 ENI 1 个 | N (按实例数) | packet-length=128, VNI=12345 |
+| Lambda | mirror_lifecycle.py | 1 | 实时创建/删除 Mirror Session |
+| Worker 数 | 默认 = CPU 核数 | — | 16 workers/实例 |
+
+采样使用 hash 确定性机制：`hash(5-tuple) % 10000 < rate × 10000`，同一 flow 要么全采要么全跳，采集结果乘 `1/rate` 放大。
+
+#### 采样精度分析
+
+| 指标 | 精度 | 说明 |
+|------|------|------|
+| 聚合告警 (总 bps/pps > 阈值) | ±3% (1000+ flows) | 大数定律，active flow 越多越准 |
+| Top Source/Dest IP | **可靠** | 数据同步 IP 通常有 10+ 连接，全部漏掉概率 0.5^10 ≈ 0.1% |
+| Top 5-tuple (单条连接) | **50% 漏检** | 每条连接只有一次 hash 机会，无统计优势 |
+
+适用场景：需要快速定位"哪个 IP 在吃带宽"（如数据同步打满链路），不需要精确到单条连接级别。
 
 ### B1 (gwlb) 40Gbps 配置
 
@@ -388,17 +409,20 @@ Appliance 网络带宽计算（B1）：
 40Gbps / 2 台 = 每台 ~20Gbps → 2.18 × 20 = ~43.6Gbps < 50Gbps
 ```
 
-### 成本对比 (eu-central-1, 20% 平均利用率)
+### 成本对比 (eu-central-1, 100 业务实例)
 
-| 组件 | B1 (gwlb) | B2 (direct, 100 实例) |
-|------|----------|----------------------|
-| Probe | $1,576 (2× c8gn.4xlarge) | $1,576 (1× c8gn.8xlarge) |
-| Appliance 2× c8gn.4xlarge | $1,576 | — |
-| GWLB 固定 + GLCU | $11,048 | — |
-| NLB 固定 + NLCU | $2,069 | — |
-| Mirror Session | $26 (2 个) | $1,314 (100 个) |
-| Lambda + EventBridge | — | ~$1 |
-| **月总计** | **~$16,300** | **~$2,891** |
+| 组件 | B1 (gwlb) | B2 全量 | B2 采样 (推荐) |
+|------|----------|---------|---------------|
+| Probe | $1,576 (2× c8gn.4xlarge) | $1,576 (1× c8gn.8xlarge) | **$788** (1× c8gn.4xlarge) |
+| Appliance 2× c8gn.4xlarge | $1,576 | — | — |
+| GWLB 固定 + GLCU (20% util) | $11,048 | — | — |
+| NLB 固定 + NLCU (20% util) | $2,069 | — | — |
+| Mirror Session | $26 (2 个) | $1,314 (100 个) | $1,314 (100 个) |
+| Lambda + EventBridge | — | ~$1 | ~$1 |
+| **月总计** | **~$16,300** | **~$2,891** | **~$2,103** |
+| **Top IP 精度** | 精确 | 精确 | ±18% (10+ 连接/IP) |
+| **Top 5-tuple 精度** | 精确 | 精确 | 50% 漏检 |
+| **聚合告警精度** | 精确 | 精确 | ±3% (1000+ flows) |
 
 ### 镜像带宽计算
 
