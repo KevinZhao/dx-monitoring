@@ -286,17 +286,23 @@ class Coordinator:
         logger.info("Coordinator stopping...")
         self._stop_event.set()
 
+        # Drain queues first to unblock workers stuck on queue.put()
+        time.sleep(0.5)
+        merged = self._drain_queues()
+
         for p in self._workers:
-            p.join(timeout=5)
+            p.join(timeout=3)
             if p.is_alive():
                 logger.warning("Worker pid=%d did not exit, terminating", p.pid)
                 p.terminate()
 
-        # Allow workers' Queue feeder threads to flush final put()
-        time.sleep(0.5)
+        # Final drain after workers exit
+        final = self._drain_queues()
+        for key, counters in final.items():
+            entry = merged.setdefault(key, [0, 0])
+            entry[0] += counters[0]
+            entry[1] += counters[1]
 
-        # Drain remaining items from queues
-        merged = self._drain_queues()
         if merged:
             self._report(merged)
 
@@ -429,12 +435,20 @@ def main() -> None:
     _load_fast_recv()
 
     # Worker count: 0 or unset = auto-detect (vCPU count)
-    num_workers = int(os.environ.get("PROBE_WORKERS", "0"))
+    try:
+        num_workers = int(os.environ.get("PROBE_WORKERS", "0"))
+    except (ValueError, TypeError):
+        logger.error("Invalid PROBE_WORKERS, using auto-detect")
+        num_workers = 0
     if num_workers <= 0:
         num_workers = os.cpu_count() or 1
     logger.info("Worker count: %d", num_workers)
 
-    sample_rate = float(os.environ.get("PROBE_SAMPLE_RATE", "1.0"))
+    try:
+        sample_rate = float(os.environ.get("PROBE_SAMPLE_RATE", "1.0"))
+    except (ValueError, TypeError):
+        logger.error("Invalid PROBE_SAMPLE_RATE, using 1.0")
+        sample_rate = 1.0
     sample_rate = max(0.0001, min(1.0, sample_rate))
     logger.info("Sample rate: %.4f", sample_rate)
 

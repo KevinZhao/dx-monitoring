@@ -178,8 +178,12 @@ capture_ctx_t* cap_create(int port, int rcvbuf)
 
     int one = 1;
     setsockopt(ctx->sock_fd, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-    setsockopt(ctx->sock_fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one));
-    setsockopt(ctx->sock_fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+    if (setsockopt(ctx->sock_fd, SOL_SOCKET, SO_REUSEPORT, &one, sizeof(one)) < 0) {
+        close(ctx->sock_fd); free(ctx); return NULL;
+    }
+    if (setsockopt(ctx->sock_fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) < 0) {
+        /* Non-fatal: kernel may cap the value, log via cap_get_rcvbuf() */
+    }
 
     /* Set socket recv timeout — more reliable than recvmmsg timeout */
     struct timeval tv = { .tv_sec = 0, .tv_usec = 100000 }; /* 100ms */

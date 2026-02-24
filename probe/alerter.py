@@ -35,19 +35,31 @@ def pps_to_human(pps: float) -> str:
     return f"{pps:.1f} Gpps"
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name, "")
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except (ValueError, TypeError):
+        logger.error("Invalid %s='%s', using default %.0f", name, raw, default)
+        return default
+
+
 class FlowAlerter:
     def __init__(self):
         self._sns_topic_arn = os.environ.get("SNS_TOPIC_ARN", "")
         self._slack_webhook_url = os.environ.get("SLACK_WEBHOOK_URL", "")
-        self._threshold_bps = float(os.environ.get("ALERT_THRESHOLD_BPS", "1000000000"))  # 1 Gbps
-        self._threshold_pps = float(os.environ.get("ALERT_THRESHOLD_PPS", "1000000"))  # 1 Mpps
-        self._cooldown_sec = float(os.environ.get("ALERT_COOLDOWN_SEC", "300"))
+        self._threshold_bps = _env_float("ALERT_THRESHOLD_BPS", 1e9)
+        self._threshold_pps = _env_float("ALERT_THRESHOLD_PPS", 1e6)
+        self._cooldown_sec = _env_float("ALERT_COOLDOWN_SEC", 300)
         self._last_alert_time: float = 0
         self._pending_detail = False  # fast alert fired, waiting for detail follow-up
-        self._host_threshold_bps = float(os.environ.get("ALERT_HOST_BPS", "0"))  # 0 = disabled
-        self._host_threshold_pps = float(os.environ.get("ALERT_HOST_PPS", "0"))
+        self._host_threshold_bps = _env_float("ALERT_HOST_BPS", 0)  # 0 = disabled
+        self._host_threshold_pps = _env_float("ALERT_HOST_PPS", 0)
         self._host_cooldowns: dict[str, float] = {}  # ip -> last_alert_time
         self._region = os.environ.get("AWS_REGION", "us-east-1")
+        self._sns_client = boto3.client("sns", region_name=self._region) if self._sns_topic_arn else None
 
     def check_fast(
         self,
@@ -250,8 +262,7 @@ class FlowAlerter:
 
     def _send_sns(self, message: str, subject: str) -> None:
         try:
-            sns = boto3.client("sns", region_name=self._region)
-            sns.publish(
+            self._sns_client.publish(
                 TopicArn=self._sns_topic_arn,
                 Subject=subject[:100],
                 Message=message,

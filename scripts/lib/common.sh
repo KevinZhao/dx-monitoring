@@ -149,7 +149,7 @@ wait_for_state() {
 
     while [[ "$elapsed" -lt "$timeout" ]]; do
         local current_state
-        current_state=$(eval "$command" 2>/dev/null || true)
+        current_state=$(bash -c "$command" 2>/dev/null || true)
         if [[ "$current_state" == "$expected_state" ]]; then
             return 0
         fi

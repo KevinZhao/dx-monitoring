@@ -14,6 +14,7 @@ class IPEnricher:
     def __init__(self):
         self._region = os.environ.get("AWS_REGION", "us-east-1")
         self._vpc_id = os.environ.get("VPC_ID", "")
+        self._ec2 = boto3.client("ec2", region_name=self._region)
         self._cache: dict[str, dict] = {}
         self._lock = threading.Lock()
         self._running = False
@@ -37,12 +38,11 @@ class IPEnricher:
 
     def _refresh(self) -> None:
         try:
-            ec2 = boto3.client("ec2", region_name=self._region)
             filters = []
             if self._vpc_id:
                 filters.append({"Name": "vpc-id", "Values": [self._vpc_id]})
 
-            paginator = ec2.get_paginator("describe_instances")
+            paginator = self._ec2.get_paginator("describe_instances")
             new_cache: dict[str, dict] = {}
 
             for page in paginator.paginate(Filters=filters):

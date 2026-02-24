@@ -148,7 +148,12 @@ int main(int argc, char *argv[])
     int pkt_size = argc > 5 ? atoi(argv[5]) : 128;
     int total_flows = argc > 6 ? atoi(argv[6]) : 100000;
 
-    if (num_threads > 64) num_threads = 64;
+    if (num_threads < 1 || num_threads > 64) {
+        fprintf(stderr, "Error: threads must be 1-64, got %d\n", num_threads);
+        return 1;
+    }
+    if (duration < 1) { fprintf(stderr, "Error: duration must be >= 1\n"); return 1; }
+    if (port < 1 || port > 65535) { fprintf(stderr, "Error: invalid port %d\n", port); return 1; }
     if (pkt_size < 64) pkt_size = 64;
     if (pkt_size > 9000) pkt_size = 9000;
     int flows_per_thread = total_flows / num_threads;
@@ -156,7 +161,10 @@ int main(int argc, char *argv[])
     struct sockaddr_in target = {0};
     target.sin_family = AF_INET;
     target.sin_port = htons(port);
-    inet_pton(AF_INET, target_ip, &target.sin_addr);
+    if (inet_pton(AF_INET, target_ip, &target.sin_addr) != 1) {
+        fprintf(stderr, "Error: invalid IP address '%s'\n", target_ip);
+        return 1;
+    }
 
     signal(SIGINT, handle_signal);
     signal(SIGTERM, handle_signal);
