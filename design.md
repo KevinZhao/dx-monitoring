@@ -331,10 +331,10 @@ VPN 模拟环境 → 流量发生 → 验证 Probe 检测
 | `WORKLOAD_SUBNETS` | Appliance/Probe/GWLB/NLB 子网 |
 | `GWLBE_SUBNETS` | GWLB Endpoint 子网 |
 | `BUSINESS_SUBNET_CIDRS` | 业务子网 CIDR |
-| `APPLIANCE_INSTANCE_TYPE` | c8gn.4xlarge（40Gbps 需网络优化实例） |
-| `APPLIANCE_COUNT` | 3（每 AZ Appliance 台数） |
-| `PROBE_INSTANCE_TYPE` | c8gn.4xlarge |
-| `PROBE_COUNT` | 2（每 AZ Probe 台数） |
+| `APPLIANCE_INSTANCE_TYPE` | c8gn.4xlarge（B1 模式，需网络优化实例） |
+| `APPLIANCE_COUNT` | 2（每 AZ Appliance 台数，仅 B1） |
+| `PROBE_INSTANCE_TYPE` | c8gn.8xlarge（32 vCPU, 100Gbps, 单台覆盖 40Gbps） |
+| `PROBE_COUNT` | 1（单台看到全部流量，告警无需聚合） |
 | `MIRROR_VNI` | 默认 12345 |
 | `PROJECT_TAG` | 默认 dx-monitoring |
 
@@ -364,12 +364,15 @@ VPN 模拟环境 → 流量发生 → 验证 Probe 检测
 
 | 组件 | 规格 | 数量 | 说明 |
 |------|------|------|------|
-| Probe | c8gn.4xlarge (50Gbps, 16 vCPU) | 每 AZ 2 台 | 每台 ~2.68Mpps, 双台 5.36Mpps > 5Mpps@40Gbps |
-| NLB | UDP/4789, 单 AZ | 1 | 自动分流到两台 Probe |
+| Probe | c8gn.8xlarge (100Gbps, 32 vCPU) | **1 台** | 32 workers ~5.36Mpps > 5Mpps@40Gbps，单台看到全部流量 |
+| NLB | UDP/4789, 单 AZ | 1 | Mirror Target（单 Probe 也需要 NLB 作为稳定 target） |
 | Mirror Session | 每业务 ENI 1 个 | N (按实例数) | packet-length=128, VNI=12345 |
 | Lambda | mirror_lifecycle.py | 1 | 实时创建/删除 Mirror Session |
 | C 流表 | 500K flows, 1M hash slots | — | 48% 负载因子 |
-| Worker 数 | 默认 = CPU 核数 | — | 16 workers/实例 |
+| Worker 数 | 默认 = CPU 核数 | — | 32 workers/实例 |
+
+单 Probe 优势：**告警天然准确**，一台看到 100% 的 DX 流量，无需跨实例聚合。
+费用与 2×c8gn.4xlarge 完全相同（$1,576/月）。
 
 ### B1 (gwlb) 40Gbps 配置
 
@@ -390,7 +393,7 @@ Appliance 网络带宽计算（B1）：
 
 | 组件 | B1 (gwlb) | B2 (direct, 100 实例) |
 |------|----------|----------------------|
-| Probe 2× c8gn.4xlarge | $1,576 | $1,576 |
+| Probe | $1,576 (2× c8gn.4xlarge) | $1,576 (1× c8gn.8xlarge) |
 | Appliance 2× c8gn.4xlarge | $1,576 | — |
 | GWLB 固定 + GLCU | $11,048 | — |
 | NLB 固定 + NLCU | $2,069 | $2,038 |
