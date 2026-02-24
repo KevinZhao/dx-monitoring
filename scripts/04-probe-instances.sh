@@ -8,6 +8,8 @@ load_env
 
 require_vars AMI_ID PROBE_SG_ID WORKLOAD_SUBNETS PROBE_INSTANCE_TYPE KEY_PAIR_NAME
 
+PROBE_COUNT=${PROBE_COUNT:-1}
+
 # --- IAM Instance Profile for Probe ---
 PROBE_ROLE_NAME="dx-probe-role-${PROJECT_TAG}"
 
@@ -93,52 +95,57 @@ USERDATA_B64=$(echo "$USERDATA" | base64 -w0)
 
 IDX=0
 for AZ in "${AZ_LIST[@]}"; do
-  VAR_NAME="PROBE_INSTANCE_ID_${IDX}"
-  if check_var_exists "$VAR_NAME"; then
-    log_info "Probe instance $IDX already exists, skipping"
-    IDX=$((IDX + 1))
-    continue
-  fi
-
   SUBNET_ID="${SUBNET_MAP[$AZ]}"
-  log_info "Launching probe instance in AZ=$AZ subnet=$SUBNET_ID"
 
-  INSTANCE_ID=$(aws ec2 run-instances \
-    --image-id "$AMI_ID" \
-    --instance-type "$PROBE_INSTANCE_TYPE" \
-    --key-name "$KEY_PAIR_NAME" \
-    --security-group-ids "$PROBE_SG_ID" \
-    --subnet-id "$SUBNET_ID" \
-    --user-data "$USERDATA_B64" \
-    --iam-instance-profile "Name=${PROBE_INSTANCE_PROFILE}" \
-    --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=dx-probe-${AZ}},{Key=Project,Value=${PROJECT_TAG}}]" \
-    --query 'Instances[0].InstanceId' --output text)
+  for N in $(seq 0 $((PROBE_COUNT - 1))); do
+    VAR_NAME="PROBE_INSTANCE_ID_${IDX}"
+    if check_var_exists "$VAR_NAME"; then
+      log_info "Probe instance $IDX already exists, skipping"
+      IDX=$((IDX + 1))
+      continue
+    fi
 
-  log_info "Launched probe instance $INSTANCE_ID in $AZ"
-  save_var "PROBE_INSTANCE_ID_${IDX}" "$INSTANCE_ID"
+    log_info "Launching probe instance ${N} in AZ=$AZ subnet=$SUBNET_ID"
 
-  IDX=$((IDX + 1))
+    INSTANCE_ID=$(aws ec2 run-instances \
+      --image-id "$AMI_ID" \
+      --instance-type "$PROBE_INSTANCE_TYPE" \
+      --key-name "$KEY_PAIR_NAME" \
+      --security-group-ids "$PROBE_SG_ID" \
+      --subnet-id "$SUBNET_ID" \
+      --user-data "$USERDATA_B64" \
+      --iam-instance-profile "Name=${PROBE_INSTANCE_PROFILE}" \
+      --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=dx-probe-${AZ}-${N}},{Key=Project,Value=${PROJECT_TAG}}]" \
+      --query 'Instances[0].InstanceId' --output text)
+
+    log_info "Launched probe instance $INSTANCE_ID in $AZ (index=$N)"
+    save_var "PROBE_INSTANCE_ID_${IDX}" "$INSTANCE_ID"
+
+    IDX=$((IDX + 1))
+  done
 done
 
 # Wait for all probe instances to be running
 load_env
 IDX=0
 for AZ in "${AZ_LIST[@]}"; do
-  VAR_NAME="PROBE_INSTANCE_ID_${IDX}"
-  INSTANCE_ID="${!VAR_NAME}"
+  for N in $(seq 0 $((PROBE_COUNT - 1))); do
+    VAR_NAME="PROBE_INSTANCE_ID_${IDX}"
+    INSTANCE_ID="${!VAR_NAME}"
 
-  log_info "Waiting for probe instance $INSTANCE_ID to be running..."
-  aws ec2 wait instance-running --instance-ids "$INSTANCE_ID"
-  log_info "Probe instance $INSTANCE_ID is running"
+    log_info "Waiting for probe instance $INSTANCE_ID to be running..."
+    aws ec2 wait instance-running --instance-ids "$INSTANCE_ID"
+    log_info "Probe instance $INSTANCE_ID is running"
 
-  PRIVATE_IP=$(aws ec2 describe-instances \
-    --instance-ids "$INSTANCE_ID" \
-    --query 'Reservations[0].Instances[0].PrivateIpAddress' --output text)
+    PRIVATE_IP=$(aws ec2 describe-instances \
+      --instance-ids "$INSTANCE_ID" \
+      --query 'Reservations[0].Instances[0].PrivateIpAddress' --output text)
 
-  save_var "PROBE_PRIVATE_IP_${IDX}" "$PRIVATE_IP"
-  log_info "Probe instance $IDX: id=$INSTANCE_ID ip=$PRIVATE_IP"
+    save_var "PROBE_PRIVATE_IP_${IDX}" "$PRIVATE_IP"
+    log_info "Probe instance $IDX: id=$INSTANCE_ID ip=$PRIVATE_IP"
 
-  IDX=$((IDX + 1))
+    IDX=$((IDX + 1))
+  done
 done
 
 log_info "All probe instances launched successfully"

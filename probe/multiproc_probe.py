@@ -104,6 +104,10 @@ def _load_fast_recv():
         lib.cap_destroy.restype = None
         lib.ip_to_str.argtypes = [ctypes.c_uint32, ctypes.c_char_p, ctypes.c_int]
         lib.ip_to_str.restype = None
+        lib.cap_get_dropped_flows.argtypes = [ctypes.c_void_p]
+        lib.cap_get_dropped_flows.restype = ctypes.c_uint64
+        lib.cap_get_probe_failures.argtypes = [ctypes.c_void_p]
+        lib.cap_get_probe_failures.restype = ctypes.c_uint64
         _fast_recv_lib = lib
         logger.info("Loaded fast_recv.so from %s", so_path)
     except OSError as e:
@@ -194,6 +198,7 @@ def _worker_c(
     ip_buf = ctypes.create_string_buffer(16)
     duration_ms = int(CAP_FLUSH_INTERVAL * 1000)
     inv_rate = 1.0 / sample_rate if sample_rate < 1.0 else 1.0
+    cumulative_queue_drops = 0
 
     try:
         while not stop_event.is_set():
@@ -202,6 +207,16 @@ def _worker_c(
 
             # Flush C hash table → flow_record array
             count = lib.cap_flush(ctx)
+
+            # Report drop stats periodically (every flush cycle)
+            dropped = lib.cap_get_dropped_flows(ctx)
+            probe_fail = lib.cap_get_probe_failures(ctx)
+            if dropped > 0 or probe_fail > 0:
+                wlog.warning(
+                    "Worker-%d DROP STATS: flow_table_full=%d probe_collisions=%d queue_drops=%d",
+                    worker_idx, dropped, probe_fail, cumulative_queue_drops,
+                )
+
             if count == 0:
                 continue
 
@@ -224,9 +239,11 @@ def _worker_c(
                 flows[(src, dst, r.proto, r.src_port, r.dst_port)] = [pkts, byt]
 
             try:
-                result_queue.put(flows, timeout=2.0)
+                result_queue.put(flows, timeout=0.5)
             except queue.Full:
-                wlog.warning("Worker-%d queue full, dropping %d flows", worker_idx, count)
+                cumulative_queue_drops += 1
+                wlog.warning("Worker-%d queue full, dropping %d flows (total_drops=%d)",
+                             worker_idx, count, cumulative_queue_drops)
     finally:
         lib.cap_destroy(ctx)
         wlog.info("Worker-%d exiting", worker_idx)
@@ -235,6 +252,23 @@ def _worker_c(
 # ---------------------------------------------------------------------------
 # Coordinator (runs in main process)
 # ---------------------------------------------------------------------------
+
+def _read_udp_drops() -> int:
+    """Read total UDP socket drops from /proc/net/udp (column 12 = drops)."""
+    total = 0
+    try:
+        with open("/proc/net/udp", "r") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 13 and parts[0] != "sl":
+                    try:
+                        total += int(parts[12])
+                    except (ValueError, IndexError):
+                        pass
+    except OSError:
+        pass
+    return total
+
 
 class Coordinator:
     def __init__(self, num_workers: int, sample_rate: float):
@@ -246,6 +280,7 @@ class Coordinator:
         self._stop_event = multiprocessing.Event()
         self._enricher = IPEnricher()
         self._alerter = FlowAlerter()
+        self._last_udp_drops = 0
 
     def start(self) -> None:
         logger.info(
@@ -419,6 +454,16 @@ class Coordinator:
             interval_sec=interval,
             enriched=enriched,
         )
+
+        # Monitor kernel-level UDP socket drops
+        current_drops = _read_udp_drops()
+        delta = current_drops - self._last_udp_drops
+        if delta > 0:
+            logger.warning(
+                "KERNEL UDP DROPS detected: +%d since last report (total=%d)",
+                delta, current_drops,
+            )
+        self._last_udp_drops = current_drops
 
 
 # ---------------------------------------------------------------------------

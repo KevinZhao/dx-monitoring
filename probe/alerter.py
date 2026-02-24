@@ -1,6 +1,8 @@
 import json
 import logging
 import os
+import queue as queue_mod
+import threading
 import time
 from typing import Optional
 
@@ -60,6 +62,10 @@ class FlowAlerter:
         self._host_cooldowns: dict[str, float] = {}  # ip -> last_alert_time
         self._region = os.environ.get("AWS_REGION", "us-east-1")
         self._sns_client = boto3.client("sns", region_name=self._region) if self._sns_topic_arn else None
+        # Async send queue — prevents SNS/Slack blocking the coordinator hot path
+        self._send_queue: queue_mod.Queue = queue_mod.Queue(maxsize=200)
+        self._sender_thread = threading.Thread(target=self._sender_loop, daemon=True)
+        self._sender_thread.start()
 
     def check_fast(
         self,
@@ -260,7 +266,34 @@ class FlowAlerter:
 
         return "\n".join(lines)
 
+    def _sender_loop(self) -> None:
+        """Background thread: drains send queue and delivers SNS/Slack alerts."""
+        while True:
+            try:
+                method, args = self._send_queue.get()
+                try:
+                    method(*args)
+                except Exception as e:
+                    logger.error("Async alert send failed: %s", e)
+            except Exception:
+                pass
+
+    def _enqueue_send(self, method, *args) -> None:
+        """Non-blocking enqueue; drops if queue full (better than blocking coordinator)."""
+        try:
+            self._send_queue.put_nowait((method, args))
+        except queue_mod.Full:
+            logger.warning("Alert send queue full, dropping alert")
+
     def _send_sns(self, message: str, subject: str) -> None:
+        if not self._sns_client:
+            return
+        self._enqueue_send(self._do_send_sns, message, subject)
+
+    def _send_slack(self, message: str) -> None:
+        self._enqueue_send(self._do_send_slack, message)
+
+    def _do_send_sns(self, message: str, subject: str) -> None:
         try:
             self._sns_client.publish(
                 TopicArn=self._sns_topic_arn,
@@ -271,7 +304,7 @@ class FlowAlerter:
         except ClientError as e:
             logger.error("Failed to send SNS alert: %s", e)
 
-    def _send_slack(self, message: str) -> None:
+    def _do_send_slack(self, message: str) -> None:
         try:
             payload = {"text": f"```\n{message}\n```"}
             resp = requests.post(

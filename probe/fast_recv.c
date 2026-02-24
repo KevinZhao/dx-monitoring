@@ -19,10 +19,10 @@
 /* ---- Configuration ---- */
 #define BATCH_SIZE      256
 #define MAX_PKT_SIZE    2048
-#define HT_SIZE         (1 << 18)   /* 262144 slots */
+#define HT_SIZE         (1 << 20)   /* 1048576 slots — supports 500K flows at ~48% load factor */
 #define HT_MASK         (HT_SIZE - 1)
-#define MAX_FLOWS       200000
-#define FLUSH_BUF_MAX   200000
+#define MAX_FLOWS       500000      /* 40Gbps DX can produce 200K+ unique flows easily */
+#define FLUSH_BUF_MAX   500000
 
 /* ---- VXLAN parsing constants ---- */
 #define VXLAN_HDR       8
@@ -71,6 +71,9 @@ typedef struct {
     uint64_t total_pkts;
     uint64_t total_bytes;
     uint64_t total_parsed;
+    /* drop counters for capacity monitoring */
+    uint64_t dropped_flows;     /* new flows rejected because table full */
+    uint64_t probe_failures;    /* flows skipped due to max linear-probe exceeded */
 } capture_ctx_t;
 
 /* ---- FNV-1a hash on 13-byte key ---- */
@@ -141,8 +144,10 @@ static inline void parse_and_record(capture_ctx_t *ctx, const uint8_t *data, int
         struct ht_entry *e = &ctx->table[idx];
         if (!e->occupied) {
             /* Empty slot: insert new flow */
-            if (ctx->num_flows >= MAX_FLOWS)
-                return; /* Table full, skip */
+            if (ctx->num_flows >= MAX_FLOWS) {
+                ctx->dropped_flows++;
+                return;
+            }
             e->src_ip   = src_ip;
             e->dst_ip   = dst_ip;
             e->src_port = sport;
@@ -164,6 +169,7 @@ static inline void parse_and_record(capture_ctx_t *ctx, const uint8_t *data, int
         idx = (idx + 1) & HT_MASK;
     }
     /* Max probes exceeded, skip this flow */
+    ctx->probe_failures++;
 }
 
 /* ---- Public API ---- */
@@ -291,9 +297,11 @@ int cap_flush(capture_ctx_t *ctx)
         }
     }
 
-    /* Reset table */
+    /* Reset table and drop counters */
     memset(ctx->table, 0, sizeof(ctx->table));
     ctx->num_flows = 0;
+    ctx->dropped_flows = 0;
+    ctx->probe_failures = 0;
 
     return count;
 }
@@ -307,6 +315,8 @@ uint64_t cap_get_total_pkts(capture_ctx_t *ctx) { return ctx->total_pkts; }
 uint64_t cap_get_total_bytes(capture_ctx_t *ctx) { return ctx->total_bytes; }
 uint64_t cap_get_total_parsed(capture_ctx_t *ctx) { return ctx->total_parsed; }
 int cap_get_num_flows(capture_ctx_t *ctx) { return ctx->num_flows; }
+uint64_t cap_get_dropped_flows(capture_ctx_t *ctx) { return ctx->dropped_flows; }
+uint64_t cap_get_probe_failures(capture_ctx_t *ctx) { return ctx->probe_failures; }
 
 void cap_destroy(capture_ctx_t *ctx)
 {

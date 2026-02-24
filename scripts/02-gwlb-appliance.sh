@@ -9,10 +9,12 @@ load_env
 require_vars VPC_ID VPC_CIDR WORKLOAD_SUBNETS GWLBE_SUBNETS \
              APPLIANCE_SG_ID APPLIANCE_INSTANCE_TYPE KEY_PAIR_NAME AMI_ID
 
+APPLIANCE_COUNT=${APPLIANCE_COUNT:-1}
+
 # ================================================================
-# Step 2a: Launch Appliance Instances (1 per AZ)
+# Step 2a: Launch Appliance Instances (APPLIANCE_COUNT per AZ)
 # ================================================================
-log_info "=== Step 2a: Launching Appliance Instances ==="
+log_info "=== Step 2a: Launching Appliance Instances (${APPLIANCE_COUNT} per AZ) ==="
 
 parse_subnets WORKLOAD_SUBNETS
 
@@ -51,45 +53,48 @@ APPLIANCE_INSTANCE_IDS=()
 
 for AZ in "${AZ_LIST[@]}"; do
     SUBNET_ID="${SUBNET_MAP[$AZ]}"
-    INSTANCE_NAME="dx-appliance-${AZ}"
 
-    # Idempotency: check if instance already exists by Name tag
-    existing=$(aws ec2 describe-instances \
-        --filters "Name=tag:Name,Values=${INSTANCE_NAME}" \
-                  "Name=instance-state-name,Values=pending,running,stopping,stopped" \
-        --query 'Reservations[0].Instances[0].InstanceId' --output text 2>/dev/null || true)
+    for N in $(seq 0 $((APPLIANCE_COUNT - 1))); do
+        INSTANCE_NAME="dx-appliance-${AZ}-${N}"
 
-    if [[ -n "$existing" && "$existing" != "None" ]]; then
-        log_info "Appliance instance ${INSTANCE_NAME} already exists: ${existing}"
-        INSTANCE_ID="$existing"
-    else
-        INSTANCE_ID=$(aws ec2 run-instances \
-            --image-id "$AMI_ID" \
-            --instance-type "$APPLIANCE_INSTANCE_TYPE" \
-            --key-name "$KEY_PAIR_NAME" \
-            --subnet-id "$SUBNET_ID" \
-            --security-group-ids "$APPLIANCE_SG_ID" \
-            --user-data "$USERDATA_B64" \
-            --tag-specifications \
-                "ResourceType=instance,Tags=[{Key=Name,Value=${INSTANCE_NAME}},{Key=Project,Value=${PROJECT_TAG}}]" \
-            --query 'Instances[0].InstanceId' --output text)
+        # Idempotency: check if instance already exists by Name tag
+        existing=$(aws ec2 describe-instances \
+            --filters "Name=tag:Name,Values=${INSTANCE_NAME}" \
+                      "Name=instance-state-name,Values=pending,running,stopping,stopped" \
+            --query 'Reservations[0].Instances[0].InstanceId' --output text 2>/dev/null || true)
 
-        log_info "Launched appliance instance ${INSTANCE_NAME}: ${INSTANCE_ID}"
-    fi
+        if [[ -n "$existing" && "$existing" != "None" ]]; then
+            log_info "Appliance instance ${INSTANCE_NAME} already exists: ${existing}"
+            INSTANCE_ID="$existing"
+        else
+            INSTANCE_ID=$(aws ec2 run-instances \
+                --image-id "$AMI_ID" \
+                --instance-type "$APPLIANCE_INSTANCE_TYPE" \
+                --key-name "$KEY_PAIR_NAME" \
+                --subnet-id "$SUBNET_ID" \
+                --security-group-ids "$APPLIANCE_SG_ID" \
+                --user-data "$USERDATA_B64" \
+                --tag-specifications \
+                    "ResourceType=instance,Tags=[{Key=Name,Value=${INSTANCE_NAME}},{Key=Project,Value=${PROJECT_TAG}}]" \
+                --query 'Instances[0].InstanceId' --output text)
 
-    # Wait for instance to be running before modifying attributes
-    log_info "Waiting for ${INSTANCE_ID} to reach running state..."
-    aws ec2 wait instance-running --instance-ids "$INSTANCE_ID"
+            log_info "Launched appliance instance ${INSTANCE_NAME}: ${INSTANCE_ID}"
+        fi
 
-    # CRITICAL: disable source/dest check for forwarding
-    aws ec2 modify-instance-attribute \
-        --instance-id "$INSTANCE_ID" \
-        --no-source-dest-check
-    log_info "Disabled source/dest check on ${INSTANCE_ID}"
+        # Wait for instance to be running before modifying attributes
+        log_info "Waiting for ${INSTANCE_ID} to reach running state..."
+        aws ec2 wait instance-running --instance-ids "$INSTANCE_ID"
 
-    save_var "APPLIANCE_INSTANCE_ID_${INSTANCE_INDEX}" "$INSTANCE_ID"
-    APPLIANCE_INSTANCE_IDS+=("$INSTANCE_ID")
-    INSTANCE_INDEX=$((INSTANCE_INDEX + 1))
+        # CRITICAL: disable source/dest check for forwarding
+        aws ec2 modify-instance-attribute \
+            --instance-id "$INSTANCE_ID" \
+            --no-source-dest-check
+        log_info "Disabled source/dest check on ${INSTANCE_ID}"
+
+        save_var "APPLIANCE_INSTANCE_ID_${INSTANCE_INDEX}" "$INSTANCE_ID"
+        APPLIANCE_INSTANCE_IDS+=("$INSTANCE_ID")
+        INSTANCE_INDEX=$((INSTANCE_INDEX + 1))
+    done
 done
 
 log_info "Appliance instances launched: ${APPLIANCE_INSTANCE_IDS[*]}"
