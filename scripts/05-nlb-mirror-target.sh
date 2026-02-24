@@ -72,11 +72,11 @@ else
   save_var NLB_ARN "$NLB_ARN"
   log_info "Created NLB: $NLB_ARN"
 
-  # Enable cross-zone load balancing
+  # Disable cross-zone to avoid cross-AZ transfer fees (single-AZ deployment)
   aws elbv2 modify-load-balancer-attributes \
     --load-balancer-arn "$NLB_ARN" \
-    --attributes Key=load_balancing.cross_zone.enabled,Value=true
-  log_info "Enabled cross-zone load balancing"
+    --attributes Key=load_balancing.cross_zone.enabled,Value=false
+  log_info "Cross-zone load balancing disabled (single-AZ cost optimization)"
 fi
 
 load_env

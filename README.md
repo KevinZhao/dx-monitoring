@@ -133,9 +133,8 @@ config/dx-monitor.conf         # VPC/VGW/子网/告警参数
 scripts/lib/common.sh          # 共享函数库 (load_config, save_var, wait_until)
 scripts/00-10,99-cleanup.sh    # 部署+运维脚本 (12 个)
 probe/multiproc_probe.py       # 多进程 VXLAN 探针 (主程序, SO_REUSEPORT)
-probe/vxlan_probe.py           # 单进程 VXLAN 探针 (基础版)
+probe/fast_recv.c              # C recvmmsg 批量收包 + hash table 聚合
 probe/fast_parse.c             # C VXLAN 解析器 (10x 加速)
-probe/fast_parse.so            # 编译后的 C 解析器
 probe/enricher.py              # IP → 实例归属映射 (60s 缓存)
 probe/alerter.py               # 阈值告警 (SNS + Slack, 300s 冷却)
 probe/requirements.txt         # Python 依赖 (boto3, requests)

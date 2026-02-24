@@ -264,8 +264,7 @@ NLB:       UDP 4789, cross-zone enabled
 |------|------|
 | `probe/fast_recv.c` | C recvmmsg 批量收包 + hash table 聚合 |
 | `probe/fast_parse.c` | C VXLAN 头解析 (ctypes fallback) |
-| `probe/multiproc_probe.py` | 多进程协调器 (C worker / Python fallback) |
-| `probe/vxlan_probe.py` | 原始单进程 probe (已弃用, 保留兼容) |
+| `probe/multiproc_probe.py` | 多进程协调器 (C worker) |
 | `probe/enricher.py` | IP -> EC2 instance 映射 |
 | `probe/alerter.py` | SNS/Slack 告警 |
 | `config/dx-monitor.conf` | PROBE_INSTANCE_TYPE=c8gn.4xlarge |

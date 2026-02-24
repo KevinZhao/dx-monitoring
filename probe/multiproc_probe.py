@@ -64,6 +64,19 @@ class _CFlowRecord(ctypes.Structure):
     ]
 
 
+class _CFlowResult(ctypes.Structure):
+    """Matches struct flow_result in fast_parse.c."""
+    _fields_ = [
+        ("src_ip", ctypes.c_uint32),
+        ("dst_ip", ctypes.c_uint32),
+        ("protocol", ctypes.c_uint8),
+        ("_pad1", ctypes.c_uint8),
+        ("src_port", ctypes.c_uint16),
+        ("dst_port", ctypes.c_uint16),
+        ("pkt_len", ctypes.c_uint16),
+    ]
+
+
 def _load_fast_recv():
     global _fast_recv_lib
     so_path = os.path.join(_probe_dir, "fast_recv.so")
@@ -220,97 +233,6 @@ def _worker_c(
 
 
 # ---------------------------------------------------------------------------
-# Worker process — Python fallback
-# ---------------------------------------------------------------------------
-
-def _worker_py(
-    worker_idx: int,
-    result_queue: multiprocessing.Queue,
-    stop_event: multiprocessing.Event,
-    sample_rate: float,
-):
-    """Fallback worker using Python socket.recvfrom()."""
-    log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
-    logging.basicConfig(
-        level=getattr(logging, log_level, logging.INFO),
-        format="%(asctime)s %(name)s %(levelname)s %(message)s",
-        force=True,
-    )
-    wlog = logging.getLogger(f"worker-{worker_idx}")
-    wlog.info("Worker-%d started (pid=%d) [Python fallback]", worker_idx, os.getpid())
-    signal.signal(signal.SIGINT, signal.SIG_IGN)
-
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, RCVBUF_SIZE)
-    sock.settimeout(1.0)
-    sock.bind((BIND_ADDR, BIND_PORT))
-
-    actual_rcvbuf = sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
-    wlog.info("Worker-%d socket bound to %s:%d (SO_RCVBUF=%d)", worker_idx, BIND_ADDR, BIND_PORT, actual_rcvbuf)
-
-    parse = parse_vxlan_packet
-    sampling = sample_rate < 1.0
-    sample_threshold = int(sample_rate * 10000)
-
-    flows: dict[FlowKey, list[int]] = defaultdict(lambda: [0, 0])
-    last_flush = time.monotonic()
-
-    try:
-        while not stop_event.is_set():
-            try:
-                data, _ = sock.recvfrom(65535)
-            except socket.timeout:
-                now = time.monotonic()
-                if now - last_flush >= REPORT_INTERVAL:
-                    snapshot = dict(flows)
-                    flows.clear()
-                    last_flush = now
-                    if snapshot:
-                        try:
-                            result_queue.put(snapshot, timeout=2.0)
-                        except queue.Full:
-                            wlog.warning("Worker-%d queue full", worker_idx)
-                continue
-            except OSError:
-                if not stop_event.is_set():
-                    wlog.exception("Socket error in worker-%d", worker_idx)
-                break
-
-            result = parse(data)
-            if result is None:
-                continue
-            key, pkt_len = result
-
-            if sampling and hash(key) % 10000 >= sample_threshold:
-                continue
-
-            entry = flows[key]
-            entry[0] += 1
-            entry[1] += pkt_len
-
-            now = time.monotonic()
-            if now - last_flush >= REPORT_INTERVAL:
-                snapshot = dict(flows)
-                flows.clear()
-                last_flush = now
-                if snapshot:
-                    try:
-                        result_queue.put(snapshot, timeout=2.0)
-                    except queue.Full:
-                        wlog.warning("Worker-%d queue full", worker_idx)
-    finally:
-        if flows:
-            try:
-                result_queue.put(dict(flows), timeout=1.0)
-            except queue.Full:
-                pass
-        sock.close()
-        wlog.info("Worker-%d exiting", worker_idx)
-
-
-# ---------------------------------------------------------------------------
 # Coordinator (runs in main process)
 # ---------------------------------------------------------------------------
 
@@ -333,8 +255,10 @@ class Coordinator:
         )
         self._enricher.start()
 
-        worker_fn = _worker_c if _fast_recv_lib else _worker_py
-        logger.info("Worker function: %s", "C recvmmsg" if _fast_recv_lib else "Python fallback")
+        if not _fast_recv_lib:
+            logger.error("fast_recv.so not found — compile with: gcc -O2 -shared -fPIC -o fast_recv.so fast_recv.c")
+            sys.exit(1)
+        worker_fn = _worker_c
 
         for i in range(self._num_workers):
             q: multiprocessing.Queue = multiprocessing.Queue()

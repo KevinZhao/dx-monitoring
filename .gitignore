@@ -1,6 +1,11 @@
 *.pem
 *.key
+*.so
+*.o
+.env
 env-vars.sh
 tests/test-env-vars.sh
 __pycache__/
 *.pyc
+.pytest_cache/
+.mypy_cache/

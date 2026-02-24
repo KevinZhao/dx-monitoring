@@ -69,7 +69,7 @@ class IPEnricher:
                 self._cache = new_cache
             logger.info("IPEnricher refreshed: %d IPs cached", len(new_cache))
 
-        except (ClientError, Exception) as e:
+        except Exception as e:
             logger.warning("IPEnricher refresh failed, keeping stale cache: %s", e)
 
     def enrich(self, ip: str) -> dict:

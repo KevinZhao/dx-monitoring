@@ -150,12 +150,12 @@ routing      │
 - **独立 FlowAggregator**：每个 Worker 维护独立流表，零跨进程共享
 - **Queue 汇总**：Coordinator 每 5s 收集并合并所有 Worker 流数据
 
-### 4.2 VXLAN 解析（双实现）
+### 4.2 VXLAN 解析
 
 | 实现 | 文件 | 性能 | 场景 |
 |------|------|------|------|
-| C 解析器 | `fast_parse.c` → `fast_parse.so` | ~10x Python | 生产 |
-| Python 解析器 | `vxlan_probe.py` 内置 | 基准 | 备用/开发 |
+| C 解析器 | `fast_parse.c` → `fast_parse.so` | 生产 | 唯一引擎 |
+| C 收包引擎 | `fast_recv.c` → `fast_recv.so` | 生产 | recvmmsg 批量收包 |
 
 C 解析器通过 `ctypes` 加载，解析流程：
 ```
